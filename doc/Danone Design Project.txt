@@ -1,0 +1,28 @@
+Intro Luiz
+
+Current State Yilin
+	RQ
+		Main activities?
+		Warehouse Capacity & Usage
+		KPI?
+		Trade-off between WHS opening hour & Throughput?
+		Possibility of reducing opening time?	
+			Time Sensitive? Activity Sensitive?
+	Problem
+	Analysis Luiz
+
+Future State Xinyu
+	Design goal
+	Technical
+	Methodology
+	Deliverables
+
+Requirement
+
+
+
+Reference
+
+
+Planning Pan
+Belbin Test
