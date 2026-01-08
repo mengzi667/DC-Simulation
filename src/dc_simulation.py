@@ -123,7 +123,9 @@ SYSTEM_PARAMETERS = {
     
     # 卡车到达参数（基于2025年全年Outbound Shipments实际数据）
     # 来源：Total Shipments 2025.xlsx - Outbound统计（305天数据）
-    # 分类别的每小时到达率（泊松分布参数λ）
+    # 分类别的每小时到达率（混合模型：75%预约+25%临时）
+    # 验证结果：FG Var/Mean=0.48, R&P Var/Mean=0.30（不符合泊松分布）
+    # 实际到达比泊松分布更规律，使用混合模型更准确
     # 全年实际数据：FG占69.3%（36.77辆/天），R&P占30.7%（16.27辆/天）
     'truck_arrival_rates': {
         'FG': {
@@ -142,11 +144,28 @@ SYSTEM_PARAMETERS = {
         }
     },
     
-    # 托盘数分布（基于实际数据）
+    # 托盘数分布（基于2025年Total Shipments实际数据）
+    # 来源：Total Shipments 2025.xlsx - 33,280批次数据分析
+    # 数据特征：FG和R&P有明显不同的分布模式
     'pallets_distribution': {
-        'min': 20,
-        'max': 35,
-        'mean': 27.5     # 平均托盘数
+        'FG': {
+            # FG: 22,276批次，均值30.0，标准差12.3，中位数33
+            'type': 'triangular',  # 使用三角分布（更接近实际）
+            'min': 1,
+            'mode': 33,      # 核密度估计的众数
+            'max': 276,
+            'mean': 30.0,    # 实际均值（用于验证）
+            'std': 12.3      # 实际标准差
+        },
+        'R&P': {
+            # R&P: 11,004批次，均值22.7，标准差9.7，中位数22
+            'type': 'triangular',
+            'min': 1,
+            'mode': 22,      # 核密度估计的众数
+            'max': 560,
+            'mean': 22.7,    # 实际均值
+            'std': 9.7       # 实际标准差
+        }
     }
 }
 
@@ -592,8 +611,19 @@ class DCSimulation:
                 # 分别生成FG和R&P的到达卡车（使用各自的到达率）
                 for category in ['FG', 'R&P']:
                     if hour in arrival_rates[category]:
-                        # 泊松到达：模拟该类别在该小时的随机到达过程
-                        num_arrivals = np.random.poisson(arrival_rates[category][hour])
+                        # 混合到达模型（预约+临时）
+                        # 基于实际数据验证：FG Var/Mean=0.48, R&P Var/Mean=0.30
+                        # 到达比泊松分布更规律，使用75%预约+25%临时模型
+                        lambda_hour = arrival_rates[category][hour]
+                        scheduled_ratio = 0.75  # 75%为预约到达
+                        
+                        # 预约到达（近似确定性）
+                        num_scheduled = int(lambda_hour * scheduled_ratio + 0.5)  # 四舍五入
+                        
+                        # 临时到达（泊松分布）
+                        num_random = np.random.poisson(lambda_hour * (1 - scheduled_ratio))
+                        
+                        num_arrivals = num_scheduled + num_random
                         
                         for _ in range(num_arrivals):
                             # 生成指定类别的卡车
@@ -709,18 +739,25 @@ class DCSimulation:
         Args:
             category: 'FG' 或 'R&P'
         
-        基于统计数据的随机生成：
-        - 类别：由调用者指定（基于实际到达率）
-        - 托盘数：20-35托盘（基于实际观察）
-        - 方向：Outbound（出库装车）
+        Returns:
+            Truck: 新生成的卡车实体
+            
+        生成规则:
+            - 类别: 由调用者指定（基于实际到达率）
+            - 托盘数: 基于实际数据的三角分布（FG: 1-33-276, R&P: 1-22-560）
+            - 方向: Outbound（出库装车）
         """
-        pallets_dist = SYSTEM_PARAMETERS['pallets_distribution']
+        pallets_dist = SYSTEM_PARAMETERS['pallets_distribution'][category]
         
-        # 随机生成托盘数
-        pallets = np.random.randint(
+        # 使用三角分布生成托盘数（更符合实际数据）
+        pallets = int(np.random.triangular(
             pallets_dist['min'], 
-            pallets_dist['max'] + 1
-        )
+            pallets_dist['mode'],
+            pallets_dist['max']
+        ))
+        
+        # 确保至少1个托盘
+        pallets = max(1, pallets)
         
         # 创建卡车实体
         truck = Truck(category, 'Outbound', pallets, self.env.now)
