@@ -76,27 +76,40 @@ SYSTEM_PARAMETERS = {
         'pallets_per_trailer': 33
     },
     
-    # 时变码头容量（基于48周Timeslot实际数据，按小时统计）
-    # 数据来源：48周×24小时Timeslot数据
-    # 按业务量分配：FG占70%，R&P占30%
+    # 时变码头容量（基于48周Timeslot实际FG/R&P分类数据）
+    # 数据来源：Timeslot W1-W48.xlsx - 48周中位数
+    # 关键发现：R&P Loading需求远超业务量占比（装车复杂度更高）
     'hourly_dock_capacity': {
-        # Loading（出库）码头 - 每小时总容量
-        'loading': {
-            0: 0, 1: 0, 2: 0, 3: 0, 4: 0, 5: 0,
-            6: 6, 7: 8, 8: 7, 9: 7, 10: 7, 11: 8,
-            12: 7, 13: 8, 14: 8, 15: 7, 16: 7, 17: 6,
-            18: 6, 19: 6, 20: 5, 21: 4, 22: 4, 23: 4
+        # FG码头容量（实际数据）
+        'FG': {
+            'loading': {  # FG Loading（出库）
+                0: 0, 1: 0, 2: 0, 3: 0, 4: 0, 5: 0,
+                6: 1, 7: 1, 8: 1, 9: 1, 10: 1, 11: 1,
+                12: 1, 13: 1, 14: 1, 15: 1, 16: 1, 17: 1,
+                18: 1, 19: 1, 20: 1, 21: 1, 22: 1, 23: 1
+            },
+            'reception': {  # FG Reception（入库）
+                0: 0, 1: 0, 2: 0, 3: 0, 4: 0, 5: 0,
+                6: 2, 7: 2, 8: 2, 9: 2, 10: 2, 11: 2,
+                12: 2, 13: 2, 14: 2, 15: 2, 16: 2, 17: 2,
+                18: 2, 19: 2, 20: 2, 21: 2, 22: 1, 23: 0
+            }
         },
-        # Reception（入库）码头 - 每小时总容量
-        'reception': {
-            0: 0, 1: 0, 2: 0, 3: 0, 4: 0, 5: 0,
-            6: 5, 7: 5, 8: 5, 9: 5, 10: 5, 11: 5,
-            12: 5, 13: 5, 14: 5, 15: 5, 16: 5, 17: 5,
-            18: 5, 19: 4, 20: 4, 21: 4, 22: 2, 23: 1
-        },
-        # 业务量分配比例
-        'fg_ratio': 0.70,  # FG占70%（59,808托盘/月）
-        'rp_ratio': 0.30   # R&P占30%（25,899托盘/月）
+        # R&P码头容量（实际数据）
+        'R&P': {
+            'loading': {  # R&P Loading（出库）
+                0: 0, 1: 0, 2: 0, 3: 0, 4: 0, 5: 0,
+                6: 4, 7: 6, 8: 5, 9: 5, 10: 5, 11: 6,
+                12: 5, 13: 6, 14: 6, 15: 5, 16: 5, 17: 4,
+                18: 4, 19: 4, 20: 3, 21: 3, 22: 3, 23: 3
+            },
+            'reception': {  # R&P Reception（入库）
+                0: 0, 1: 0, 2: 0, 3: 0, 4: 0, 5: 0,
+                6: 1, 7: 1, 8: 1, 9: 1, 10: 1, 11: 1,
+                12: 1, 13: 1, 14: 1, 15: 1, 16: 1, 17: 1,
+                18: 1, 19: 1, 20: 1, 21: 1, 22: 1, 23: 1
+            }
+        }
     },
     
     # 人力资源（基于KPI sheet实际工时数据）
@@ -417,20 +430,21 @@ class DCSimulation:
     
     def _init_resources(self):
         """初始化仿真资源（时变码头容量）"""
-        # 时变码头资源 - 初始化为最大容量，运行时动态调整
+        # 时变码头资源 - 使用实际FG/R&P分类数据（来自48周Timeslot）
         hourly_config = SYSTEM_PARAMETERS['hourly_dock_capacity']
-        max_loading = max(hourly_config['loading'].values())
-        max_reception = max(hourly_config['reception'].values())
         
-        fg_ratio = hourly_config['fg_ratio']
-        rp_ratio = hourly_config['rp_ratio']
+        # 获取FG和R&P的最大容量（不再使用70:30比例）
+        max_fg_loading = max(hourly_config['FG']['loading'].values())
+        max_fg_reception = max(hourly_config['FG']['reception'].values())
+        max_rp_loading = max(hourly_config['R&P']['loading'].values())
+        max_rp_reception = max(hourly_config['R&P']['reception'].values())
         
         # 创建最大容量的码头资源（稍后通过request数量控制实际可用数）
         self.max_docks = {
-            'fg_reception': int(max_reception * fg_ratio) + 1,
-            'fg_loading': int(max_loading * fg_ratio) + 1,
-            'rp_reception': int(max_reception * rp_ratio) + 1,
-            'rp_loading': int(max_loading * rp_ratio) + 1
+            'fg_reception': max_fg_reception,
+            'fg_loading': max_fg_loading,
+            'rp_reception': max_rp_reception,
+            'rp_loading': max_rp_loading
         }
         
         self.docks = {
@@ -470,21 +484,15 @@ class DCSimulation:
     def update_dock_capacity_process(self):
         """动态更新码头容量（按小时）"""
         hourly_config = SYSTEM_PARAMETERS['hourly_dock_capacity']
-        fg_ratio = hourly_config['fg_ratio']
-        rp_ratio = hourly_config['rp_ratio']
         
         while True:
             current_hour = int(self.env.now) % 24
             
-            # 获取当前小时的总容量
-            total_loading = hourly_config['loading'].get(current_hour, 0)
-            total_reception = hourly_config['reception'].get(current_hour, 0)
-            
-            # 按业务量分配
-            self.current_dock_capacity['fg_loading'] = max(1, int(total_loading * fg_ratio))
-            self.current_dock_capacity['rp_loading'] = max(1, int(total_loading * rp_ratio))
-            self.current_dock_capacity['fg_reception'] = max(1, int(total_reception * fg_ratio))
-            self.current_dock_capacity['rp_reception'] = max(1, int(total_reception * rp_ratio))
+            # 直接使用FG和R&P的实际容量（不再计算比例）
+            self.current_dock_capacity['fg_loading'] = hourly_config['FG']['loading'].get(current_hour, 0)
+            self.current_dock_capacity['rp_loading'] = hourly_config['R&P']['loading'].get(current_hour, 0)
+            self.current_dock_capacity['fg_reception'] = hourly_config['FG']['reception'].get(current_hour, 0)
+            self.current_dock_capacity['rp_reception'] = hourly_config['R&P']['reception'].get(current_hour, 0)
             
             # 等待到下一个小时
             next_hour = (int(self.env.now) // 1 + 1) * 1

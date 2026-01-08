@@ -159,9 +159,38 @@ if loading_range > 2 or reception_range > 2:
 else:
     print("\n✓ 容量相对稳定，可以使用固定值")
 
+# 分析FG和R&P各自的容量
+print("\n" + "=" * 70)
+print("FG和R&P码头容量统计")
+print("=" * 70)
+
+# 计算FG和R&P各自的中位数
+fg_loading_stats = {}
+fg_reception_stats = {}
+rp_loading_stats = {}
+rp_reception_stats = {}
+
+for hour in work_hours:
+    if fg_hourly_loading[hour]:
+        fg_loading_stats[hour] = np.median(fg_hourly_loading[hour])
+    if fg_hourly_reception[hour]:
+        fg_reception_stats[hour] = np.median(fg_hourly_reception[hour])
+    if rp_hourly_loading[hour]:
+        rp_loading_stats[hour] = np.median(rp_hourly_loading[hour])
+    if rp_hourly_reception[hour]:
+        rp_reception_stats[hour] = np.median(rp_hourly_reception[hour])
+
+print("\nFG码头容量（中位数）:")
+print("  Loading:", {h: int(fg_loading_stats.get(h, 0)) for h in range(6, 24)})
+print("  Reception:", {h: int(fg_reception_stats.get(h, 0)) for h in range(6, 24)})
+
+print("\nR&P码头容量（中位数）:")
+print("  Loading:", {h: int(rp_loading_stats.get(h, 0)) for h in range(6, 24)})
+print("  Reception:", {h: int(rp_reception_stats.get(h, 0)) for h in range(6, 24)})
+
 # 推荐配置
 print("\n" + "=" * 70)
-print("推荐码头配置")
+print("推荐码头配置（基于实际FG/R&P数据）")
 print("=" * 70)
 
 # 方案1: 使用工作时段的中位数
@@ -177,21 +206,18 @@ reception_overall_median = np.median(reception_work_all)
 print("\n方案1: 使用工作时段整体中位数（简化模型）")
 print(f"  总Loading: {loading_overall_median:.0f} 个码头")
 print(f"  总Reception: {reception_overall_median:.0f} 个码头")
-print(f"  按业务量分配（FG 70%, R&P 30%）:")
-print(f"    - FG Loading: {int(loading_overall_median * 0.7)} 个")
-print(f"    - R&P Loading: {int(loading_overall_median * 0.3)} 个")
-print(f"    - FG Reception: {int(reception_overall_median * 0.7)} 个")
-print(f"    - R&P Reception: {int(reception_overall_median * 0.3)} 个")
 
-# 方案2: 使用峰值容量（保守）
-print("\n方案2: 使用峰值容量（保守，能应对高峰）")
+# 方案2: 使用实际分类数据（推荐！）
+print("\n方案2: 使用FG和R&P实际容量（推荐，基于真实数据）")
+print("  FG Loading: 按小时变化 (峰值: {}个)".format(int(max(fg_loading_stats.values())) if fg_loading_stats else 0))
+print("  FG Reception: 按小时变化 (峰值: {}个)".format(int(max(fg_reception_stats.values())) if fg_reception_stats else 0))
+print("  R&P Loading: 按小时变化 (峰值: {}个)".format(int(max(rp_loading_stats.values())) if rp_loading_stats else 0))
+print("  R&P Reception: 按小时变化 (峰值: {}个)".format(int(max(rp_reception_stats.values())) if rp_reception_stats else 0))
+
+# 方案3: 使用峰值容量（保守）
+print("\n方案3: 使用峰值容量（保守，能应对高峰）")
 print(f"  总Loading峰值: {int(loading_max)} 个码头")
 print(f"  总Reception峰值: {int(reception_max)} 个码头")
-print(f"  按业务量分配:")
-print(f"    - FG Loading: {int(loading_max * 0.7)} 个")
-print(f"    - R&P Loading: {int(loading_max * 0.3)} 个")
-print(f"    - FG Reception: {int(reception_max * 0.7)} 个")
-print(f"    - R&P Reception: {int(reception_max * 0.3)} 个")
 
 # 方案3: 时变配置
 print("\n方案3: 时变码头配置（高级，最真实）")
@@ -248,22 +274,51 @@ with open('dock_capacity_hourly_analysis.txt', 'w', encoding='utf-8') as f:
     f.write("按时间段的码头容量分析（48周数据）\n")
     f.write("=" * 70 + "\n\n")
     
-    f.write("Loading码头容量（按小时）:\n")
+    f.write("总Loading码头容量（按小时）:\n")
     for h in work_hours:
         if hourly_loading[h]:
             f.write(f"  {h:02d}:00 - 中位数: {np.median(hourly_loading[h]):.0f}, ")
             f.write(f"众数: {Counter(hourly_loading[h]).most_common(1)[0][0]:.0f}\n")
     
-    f.write("\nReception码头容量（按小时）:\n")
+    f.write("\n总Reception码头容量（按小时）:\n")
     for h in work_hours:
         if hourly_reception[h]:
             f.write(f"  {h:02d}:00 - 中位数: {np.median(hourly_reception[h]):.0f}, ")
             f.write(f"众数: {Counter(hourly_reception[h]).most_common(1)[0][0]:.0f}\n")
     
-    f.write(f"\n建议配置:\n")
-    f.write(f"  - 简化模型: Loading={loading_overall_median:.0f}, Reception={reception_overall_median:.0f}\n")
-    f.write(f"  - 保守配置: Loading={loading_max:.0f}, Reception={reception_max:.0f}\n")
-    f.write(f"  - 时变特性: 变化幅度 Loading={loading_range:.0f}, Reception={reception_range:.0f}\n")
+    f.write("\n" + "=" * 70 + "\n")
+    f.write("FG码头容量（按小时中位数）:\n")
+    f.write("=" * 70 + "\n\n")
+    f.write("FG Loading:\n")
+    for h in work_hours:
+        if h in fg_loading_stats:
+            f.write(f"  {h:02d}:00 - {int(fg_loading_stats[h])} 个码头\n")
+    
+    f.write("\nFG Reception:\n")
+    for h in work_hours:
+        if h in fg_reception_stats:
+            f.write(f"  {h:02d}:00 - {int(fg_reception_stats[h])} 个码头\n")
+    
+    f.write("\n" + "=" * 70 + "\n")
+    f.write("R&P码头容量（按小时中位数）:\n")
+    f.write("=" * 70 + "\n\n")
+    f.write("R&P Loading:\n")
+    for h in work_hours:
+        if h in rp_loading_stats:
+            f.write(f"  {h:02d}:00 - {int(rp_loading_stats[h])} 个码头\n")
+    
+    f.write("\nR&P Reception:\n")
+    for h in work_hours:
+        if h in rp_reception_stats:
+            f.write(f"  {h:02d}:00 - {int(rp_reception_stats[h])} 个码头\n")
+    
+    f.write(f"\n" + "=" * 70 + "\n")
+    f.write(f"建议配置:\n")
+    f.write(f"=" * 70 + "\n\n")
+    f.write(f"  方案1 - 简化模型: Loading={loading_overall_median:.0f}, Reception={reception_overall_median:.0f}\n")
+    f.write(f"  方案2 - 使用实际FG/R&P数据（推荐！）\n")
+    f.write(f"  方案3 - 保守配置: Loading={loading_max:.0f}, Reception={reception_max:.0f}\n")
+    f.write(f"\n  时变特性: 变化幅度 Loading={loading_range:.0f}, Reception={reception_range:.0f}\n")
 
 print(f"✓ 详细数据已保存: dock_capacity_hourly_analysis.txt")
 
