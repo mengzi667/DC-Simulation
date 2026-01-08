@@ -38,9 +38,10 @@ wheels/
 Thumbs.db
 desktop.ini
 
-# Data files (uncomment if you don't want to track data)
-# data/*.xlsx
-# data/**/*.xlsx
+# Data files - DO NOT TRACK
+data/
+drive-download-*/
+doc/
 
 # Simulation outputs
 outputs/results/*.xlsx
