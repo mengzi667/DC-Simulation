@@ -192,6 +192,22 @@ class Truck:
         return f"Truck-{self.id}({self.category}-{self.direction}, {self.pallets}p)"
 
 
+class Order:
+    """订单实体 - 用于跟踪SLA"""
+    _id_counter = 0
+    
+    def __init__(self, pallets, order_time, departure_time):
+        Order._id_counter += 1
+        self.id = Order._id_counter
+        self.pallets = pallets
+        self.order_time = order_time  # 下单/到达时间
+        self.departure_time = departure_time  # 要求发运时间
+        self.completion_time = None  # 实际完成时间
+        
+    def __repr__(self):
+        return f"Order-{self.id}({self.pallets}p, deadline:{self.departure_time})"
+
+
 # ==================== 资源管理器 ====================
 
 class TrailerBuffer:
@@ -248,17 +264,28 @@ class FTEManager:
         self.efficiency_params = SYSTEM_PARAMETERS['efficiency']
         
     def get_efficiency(self, category):
-        """获取实际效率（考虑随机波动）"""
+        """获取团队实际效率（考虑随机波动）
+        
+        返回: 团队总效率（托盘/小时）
+        计算: 单人效率 × 分配人数
+        """
         if category == 'R&P':
             mean = self.efficiency_params['rp_mean']
             std = self.efficiency_params['rp_std']
+            # R&P团队：28人，假设每个码头平均分配5-7人
+            team_size = 6
         else:  # FG
             mean = self.efficiency_params['fg_mean']
             std = self.efficiency_params['fg_std']
+            # FG团队：97人，假设每个码头平均分配8-10人
+            team_size = 10
         
         # 使用截断正态分布（避免负值或异常值）
-        efficiency = np.random.normal(mean, std)
-        return max(efficiency, mean * 0.5)  # 最低效率为平均值的 50%
+        efficiency_per_person = np.random.normal(mean, std)
+        efficiency_per_person = max(efficiency_per_person, mean * 0.5)  # 最低效率为平均值的 50%
+        
+        # 返回团队总效率
+        return efficiency_per_person * team_size
     
     def allocate_fte(self, rp_workload, fg_workload):
         """根据工作负荷动态分配 FTE"""
@@ -670,7 +697,8 @@ class DCSimulation:
             
             start_time = self.env.now
             
-            # 获取效率并计算处理时间
+            # 获取团队效率并计算处理时间
+            # efficiency: 团队总效率（托盘/小时）
             efficiency = self.fte_manager.get_efficiency(category)
             processing_time = pallets / efficiency
             
@@ -713,7 +741,10 @@ class DCSimulation:
             # 记录等待时间
             self.kpi.record_truck_wait(truck)
             
-            # 获取效率并计算装车时间
+            # 获取团队效率并计算装车时间
+            # efficiency: 团队总效率（托盘/小时）
+            # 例如：FG团队10人 × 3.5托盘/小时/人 = 35托盘/小时
+            #       30托盘 / 35托盘/小时 = 0.86小时 ≈ 51分钟
             efficiency = self.fte_manager.get_efficiency(truck.category)
             loading_time = truck.pallets / efficiency
             
