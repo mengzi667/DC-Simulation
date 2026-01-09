@@ -534,11 +534,13 @@ class DCSimulation:
         print(f"\n开始仿真运行，持续 {duration_days} 天...")
         
         # 启动各个进程
+        self.env.process(self.update_dock_capacity_process())  # 启动码头容量更新（重要！）
         self.env.process(self.factory_production_process('R&P'))
         self.env.process(self.factory_production_process('FG'))
         self.env.process(self.buffer_release_process())
         self.env.process(self.truck_arrival_process())  # 统一的卡车到达进程（包含FG和R&P）
         self.env.process(self.buffer_monitor())
+        self.env.process(self.midnight_backlog_monitor())  # 启动午夜积压监控
         
         # 运行仿真
         self.env.run(until=duration_days * 24)
@@ -646,17 +648,21 @@ class DCSimulation:
         # 根据类别确定码头键名（使用大写，与资源字典匹配）
         if category == 'R&P':
             dock_key = 'RP_Reception'
+            capacity_key = 'rp_reception'
         else:
             dock_key = 'FG_Reception'
+            capacity_key = 'fg_reception'
         
-        # 检查当前可用码头数
-        available_docks = self.get_available_docks('reception', category)
-        
-        # 如果没有可用码头，等待
-        if available_docks == 0:
-            yield self.env.timeout(1)  # 等待1小时后重试
-            self.env.process(self.inbound_process(category, pallets, from_buffer))
-            return
+        # 等待直到有可用码头
+        while True:
+            available_docks = self.current_dock_capacity[capacity_key]
+            current_usage = len(self.docks[dock_key].queue) + self.docks[dock_key].count
+            
+            if available_docks > 0 and current_usage < available_docks:
+                break  # 有可用码头，跳出等待循环
+            else:
+                # 没有可用码头，等待15分钟后重新检查
+                yield self.env.timeout(0.25)
         
         # 请求码头资源
         with self.docks[dock_key].request() as req:
@@ -675,23 +681,28 @@ class DCSimulation:
             self.kpi.record_inbound_operation(
                 category, pallets, start_time, self.env.now, from_buffer
             )
+
     
     def outbound_process(self, truck):
         """出库处理进程（考虑时变码头容量）"""
         # 根据类别确定码头键名
         if truck.category == 'R&P':
             dock_key = 'RP_Loading'
+            capacity_key = 'rp_loading'
         else:
             dock_key = 'FG_Loading'
+            capacity_key = 'fg_loading'
         
-        # 检查当前可用码头数
-        available_docks = self.get_available_docks('loading', truck.category)
-        
-        # 如果没有可用码头，等待
-        if available_docks == 0:
-            yield self.env.timeout(1)
-            self.env.process(self.outbound_process(truck))
-            return
+        # 等待直到有可用码头
+        while True:
+            available_docks = self.current_dock_capacity[capacity_key]
+            current_usage = len(self.docks[dock_key].queue) + self.docks[dock_key].count
+            
+            if available_docks > 0 and current_usage < available_docks:
+                break  # 有可用码头，跳出等待循环
+            else:
+                # 没有可用码头，等待15分钟后重新检查
+                yield self.env.timeout(0.25)
         
         # 请求装车码头
         with self.docks[dock_key].request() as req:
@@ -732,6 +743,21 @@ class DCSimulation:
             
             yield self.env.timeout(1)  # 每小时记录
     
+    def midnight_backlog_monitor(self):
+        """午夜积压监控器 - 每天24:00记录待处理订单"""
+        while True:
+            # 等到下一个午夜（24小时）
+            current_hour = self.env.now % 24
+            time_to_midnight = 24 - current_hour if current_hour > 0 else 24
+            yield self.env.timeout(time_to_midnight)
+            
+            # 记录缓冲区积压（作为待处理托盘数）
+            day = int(self.env.now / 24)
+            pending_pallets = self.buffer_rp.current_pallets + self.buffer_fg.current_pallets
+            pending_orders = 0  # 暂时使用0，实际应该统计等待队列中的卡车数
+            
+            self.kpi.record_midnight_backlog(day, pending_orders, pending_pallets)
+    
     def _generate_truck(self, category):
         """
         生成指定类别的随机到达卡车
@@ -761,6 +787,10 @@ class DCSimulation:
         
         # 创建卡车实体
         truck = Truck(category, 'Outbound', pallets, self.env.now)
+        
+        # 为成品出库设置发运时限（到达后8小时内必须完成）
+        if category == 'FG':
+            truck.departure_deadline = self.env.now + 8  # 8小时SLA
         
         return truck
 
@@ -846,80 +876,104 @@ def run_scenario_comparison(scenarios_to_run=None, num_replications=5, duration_
 # ==================== 可视化 ====================
 
 def visualize_results(comparison_df):
-    """可视化场景对比结果"""
-    
-    fig, axes = plt.subplots(2, 3, figsize=(18, 10))
-    fig.suptitle('DC 运营时间缩短场景对比分析', fontsize=16, fontweight='bold')
+    """可视化场景对比结果 - 分开保存为多张图"""
     
     scenarios = comparison_df.index.tolist()
     scenario_labels = [SIMULATION_CONFIG[s]['name'] for s in scenarios]
     
-    # 1. SLA 遵守率
-    ax = axes[0, 0]
+    print(f"\n{'='*70}")
+    print("生成可视化图表...")
+    print(f"{'='*70}")
+    
+    # ========== 图1: SLA 遵守率 ==========
+    fig, ax = plt.subplots(figsize=(10, 6))
     compliance_rates = comparison_df['sla_compliance_rate'] * 100
     errors = comparison_df['sla_compliance_rate_std'] * 100
     bars = ax.bar(scenario_labels, compliance_rates, yerr=errors, capsize=5, 
                    color=['#2ecc71', '#f39c12', '#e74c3c', '#c0392b'][:len(scenarios)])
-    ax.set_ylabel('SLA 遵守率 (%)', fontsize=11)
-    ax.set_title('SLA 遵守率对比', fontsize=12, fontweight='bold')
+    ax.set_ylabel('SLA 遵守率 (%)', fontsize=12)
+    ax.set_title('SLA 遵守率对比', fontsize=14, fontweight='bold', pad=20)
     ax.set_ylim([0, 105])
-    ax.axhline(y=95, color='red', linestyle='--', linewidth=1, label='目标 95%')
-    ax.legend()
+    ax.axhline(y=95, color='red', linestyle='--', linewidth=2, label='目标 95%')
+    ax.legend(fontsize=11)
     ax.grid(axis='y', alpha=0.3)
     
-    # 添加数值标签
     for bar in bars:
         height = bar.get_height()
         ax.text(bar.get_x() + bar.get_width()/2., height,
-                f'{height:.1f}%', ha='center', va='bottom', fontsize=9)
+                f'{height:.1f}%', ha='center', va='bottom', fontsize=10, fontweight='bold')
     
-    # 2. 缓冲区溢出事件
-    ax = axes[0, 1]
+    plt.tight_layout()
+    path1 = os.path.join(FIGURES_DIR, '1_sla_compliance_rate.png')
+    plt.savefig(path1, dpi=300, bbox_inches='tight')
+    print(f"✓ SLA遵守率图已保存: {path1}")
+    plt.close()
+    
+    # ========== 图2: 缓冲区溢出事件 ==========
+    fig, ax = plt.subplots(figsize=(10, 6))
     overflow_events = comparison_df['buffer_overflow_events']
     errors = comparison_df['buffer_overflow_events_std']
     bars = ax.bar(scenario_labels, overflow_events, yerr=errors, capsize=5,
                    color=['#3498db', '#9b59b6', '#e67e22', '#e74c3c'][:len(scenarios)])
-    ax.set_ylabel('溢出事件数', fontsize=11)
-    ax.set_title('缓冲区溢出事件', fontsize=12, fontweight='bold')
+    ax.set_ylabel('溢出事件数', fontsize=12)
+    ax.set_title('缓冲区溢出事件对比', fontsize=14, fontweight='bold', pad=20)
     ax.grid(axis='y', alpha=0.3)
     
     for bar in bars:
         height = bar.get_height()
         ax.text(bar.get_x() + bar.get_width()/2., height,
-                f'{height:.0f}', ha='center', va='bottom', fontsize=9)
+                f'{height:.0f}', ha='center', va='bottom', fontsize=10, fontweight='bold')
     
-    # 3. 平均卡车等待时间
-    ax = axes[0, 2]
+    plt.tight_layout()
+    path2 = os.path.join(FIGURES_DIR, '2_buffer_overflow_events.png')
+    plt.savefig(path2, dpi=300, bbox_inches='tight')
+    print(f"✓ 缓冲区溢出图已保存: {path2}")
+    plt.close()
+    
+    # ========== 图3: 平均卡车等待时间 ==========
+    fig, ax = plt.subplots(figsize=(10, 6))
     wait_times = comparison_df['avg_truck_wait_time']
     errors = comparison_df['avg_truck_wait_time_std']
     bars = ax.bar(scenario_labels, wait_times, yerr=errors, capsize=5,
                    color=['#1abc9c', '#16a085', '#27ae60', '#2980b9'][:len(scenarios)])
-    ax.set_ylabel('等待时间 (小时)', fontsize=11)
-    ax.set_title('平均卡车等待时间', fontsize=12, fontweight='bold')
+    ax.set_ylabel('等待时间 (小时)', fontsize=12)
+    ax.set_title('平均卡车等待时间对比', fontsize=14, fontweight='bold', pad=20)
     ax.grid(axis='y', alpha=0.3)
     
     for bar in bars:
         height = bar.get_height()
         ax.text(bar.get_x() + bar.get_width()/2., height,
-                f'{height:.2f}h', ha='center', va='bottom', fontsize=9)
+                f'{height:.2f}h', ha='center', va='bottom', fontsize=10, fontweight='bold')
     
-    # 4. 午夜积压
-    ax = axes[1, 0]
+    plt.tight_layout()
+    path3 = os.path.join(FIGURES_DIR, '3_avg_truck_wait_time.png')
+    plt.savefig(path3, dpi=300, bbox_inches='tight')
+    print(f"✓ 等待时间图已保存: {path3}")
+    plt.close()
+    
+    # ========== 图4: 午夜积压 ==========
+    fig, ax = plt.subplots(figsize=(10, 6))
     backlogs = comparison_df['avg_midnight_backlog_pallets']
     errors = comparison_df['avg_midnight_backlog_pallets_std']
     bars = ax.bar(scenario_labels, backlogs, yerr=errors, capsize=5,
                    color=['#95a5a6', '#7f8c8d', '#34495e', '#2c3e50'][:len(scenarios)])
-    ax.set_ylabel('积压托盘数', fontsize=11)
-    ax.set_title('平均午夜积压', fontsize=12, fontweight='bold')
+    ax.set_ylabel('积压托盘数', fontsize=12)
+    ax.set_title('平均午夜积压对比', fontsize=14, fontweight='bold', pad=20)
     ax.grid(axis='y', alpha=0.3)
     
     for bar in bars:
         height = bar.get_height()
         ax.text(bar.get_x() + bar.get_width()/2., height,
-                f'{height:.0f}', ha='center', va='bottom', fontsize=9)
+                f'{height:.0f}', ha='center', va='bottom', fontsize=10, fontweight='bold')
     
-    # 5. 缓冲区平均占用率
-    ax = axes[1, 1]
+    plt.tight_layout()
+    path4 = os.path.join(FIGURES_DIR, '4_midnight_backlog.png')
+    plt.savefig(path4, dpi=300, bbox_inches='tight')
+    print(f"✓ 午夜积压图已保存: {path4}")
+    plt.close()
+    
+    # ========== 图5: 缓冲区平均占用率 ==========
+    fig, ax = plt.subplots(figsize=(10, 6))
     rp_occupancy = comparison_df['r&p_avg_buffer_occupancy'] * 100
     fg_occupancy = comparison_df['fg_avg_buffer_occupancy'] * 100
     
@@ -929,20 +983,26 @@ def visualize_results(comparison_df):
     bars1 = ax.bar(x - width/2, rp_occupancy, width, label='R&P', color='#3498db')
     bars2 = ax.bar(x + width/2, fg_occupancy, width, label='FG', color='#e74c3c')
     
-    ax.set_ylabel('占用率 (%)', fontsize=11)
-    ax.set_title('缓冲区平均占用率', fontsize=12, fontweight='bold')
+    ax.set_ylabel('占用率 (%)', fontsize=12)
+    ax.set_title('缓冲区平均占用率对比', fontsize=14, fontweight='bold', pad=20)
     ax.set_xticks(x)
     ax.set_xticklabels(scenario_labels)
-    ax.legend()
+    ax.legend(fontsize=11)
     ax.grid(axis='y', alpha=0.3)
     
-    # 6. 综合评分（自定义加权）
-    ax = axes[1, 2]
+    plt.tight_layout()
+    path5 = os.path.join(FIGURES_DIR, '5_buffer_occupancy.png')
+    plt.savefig(path5, dpi=300, bbox_inches='tight')
+    print(f"✓ 缓冲区占用率图已保存: {path5}")
+    plt.close()
+    
+    # ========== 图6: 综合评分 ==========
+    fig, ax = plt.subplots(figsize=(10, 6))
     
     # 归一化并计算综合得分（越高越好）
     # 权重：SLA 40%, 缓冲溢出 20%, 等待时间 20%, 积压 20%
     normalized_scores = pd.DataFrame()
-    normalized_scores['sla'] = comparison_df['sla_compliance_rate'] * 100  # 已经是百分比
+    normalized_scores['sla'] = comparison_df['sla_compliance_rate'] * 100
     normalized_scores['buffer'] = 100 - (comparison_df['buffer_overflow_events'] / 
                                           comparison_df['buffer_overflow_events'].max() * 100)
     normalized_scores['wait'] = 100 - (comparison_df['avg_truck_wait_time'] / 
@@ -955,23 +1015,28 @@ def visualize_results(comparison_df):
                        normalized_scores['wait'] * 0.2 +
                        normalized_scores['backlog'] * 0.2)
     
-    bars = ax.barh(scenario_labels, composite_score, color=['#27ae60', '#f39c12', '#e67e22', '#c0392b'][:len(scenarios)])
-    ax.set_xlabel('综合得分', fontsize=11)
+    bars = ax.barh(scenario_labels, composite_score, 
+                   color=['#27ae60', '#f39c12', '#e67e22', '#c0392b'][:len(scenarios)])
+    ax.set_xlabel('综合得分', fontsize=12)
     ax.set_title('综合性能评分\n(SLA 40%, 缓冲 20%, 等待 20%, 积压 20%)', 
-                 fontsize=12, fontweight='bold')
+                 fontsize=14, fontweight='bold', pad=20)
     ax.set_xlim([0, 105])
     ax.grid(axis='x', alpha=0.3)
     
     for i, bar in enumerate(bars):
         width = bar.get_width()
         ax.text(width, bar.get_y() + bar.get_height()/2.,
-                f'{width:.1f}', ha='left', va='center', fontsize=9, fontweight='bold')
+                f' {width:.1f}', ha='left', va='center', fontsize=10, fontweight='bold')
     
     plt.tight_layout()
-    viz_path = os.path.join(FIGURES_DIR, 'simulation_results_visualization.png')
-    plt.savefig(viz_path, dpi=300, bbox_inches='tight')
-    print(f"\n可视化图表已保存到: {viz_path}")
-    plt.show()
+    path6 = os.path.join(FIGURES_DIR, '6_composite_score.png')
+    plt.savefig(path6, dpi=300, bbox_inches='tight')
+    print(f"✓ 综合评分图已保存: {path6}")
+    plt.close()
+    
+    print(f"{'='*70}")
+    print(f"所有可视化图表已生成完成！共6张图片保存在: {FIGURES_DIR}")
+    print(f"{'='*70}")
 
 
 # ==================== 主程序入口 ====================
