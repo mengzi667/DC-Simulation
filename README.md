@@ -15,10 +15,12 @@
 ## 🎯 快速开始
 
 ### 1. 查看流程图
-📊 **[查看仿真架构流程图](outputs/figures/DC_Simulation_Architecture.jpg)** - 一图了解整个模型
+📊 **[查看仿真架构流程图](outputs/figures/simulation_structure_diagram.png)** - 一图了解整个模型
 
 ### 2. 阅读文档
-📖 **[DC仿真模型完整总结](docs/DC_SIMULATION_SUMMARY.md)** - 详细的模型说明和参数解释
+📖 **[仿真模型概述](docs/SIMULATION_MODEL_OVERVIEW.md)** - 自然语言描述的完整模型总览（实体、资源、进程、事件、分布）
+
+📚 **[技术架构文档](docs/SIMULATION_MODEL_STRUCTURE.md)** - 详细的技术实现和参数说明
 
 ### 3. 运行仿真
 ```bash
@@ -82,24 +84,23 @@ Design_Project/
 │   └── Timeslot by week/ (W1-W48)
 │
 ├── 📁 src/               # 源代码
-│   ├── dc_simulation.py           # 主仿真模型 (954行) ⭐
-│   ├── data_preparation.py        # 数据提取 (517行)
-│   └── analyze_hourly_capacity.py # 容量分析 (273行)
+│   ├── dc_simulation.py           # 主仿真模型 (999行) ⭐
+│   └── data_preparation.py        # 数据提取工具
 │
 ├── 📁 outputs/           # 结果输出
-│   ├── results/          # Excel结果
-│   └── figures/          # 流程图和图表 ⭐
+│   ├── results/          # Excel结果和验证报告
+│   └── figures/          # 流程图和可视化图表 ⭐
 │
-├── 📁 docs/              # 项目文档
-│   ├── DC_SIMULATION_SUMMARY.md    # 模型完整总结 ⭐
-│   ├── PROJECT_STRUCTURE.md        # 项目结构说明
-│   ├── SIMULATION_ANALYSIS.md      # 架构详细分析
-│   └── archive/                    # 历史文档
+├── 📁 docs/              # 核心文档
+│   ├── SIMULATION_MODEL_OVERVIEW.md    # 自然语言模型总览 ⭐ NEW
+│   ├── SIMULATION_MODEL_STRUCTURE.md   # 技术架构文档 ⭐
+│   ├── SIMULATION_ANALYSIS.md          # 分析结果文档
+│   └── archive/                        # 历史文档和验证报告
+│
+├── 📁 scripts/           # 辅助脚本
 │
 └── README.md             # 本文档
 ```
-
-**详细结构**: 查看 [PROJECT_STRUCTURE.md](docs/PROJECT_STRUCTURE.md)
 
 ---
 
@@ -107,20 +108,26 @@ Design_Project/
 
 ### KPI指标
 - ✅ 等待时间 (平均/最大/P95)
-- ✅ 缓冲区占用率 (R&P/FG)
+- ✅ SLA遵守率 (成品出库时限)
+- ✅ 缓冲区占用率 (R&P: 495托盘, FG: 660托盘)
+- ✅ 溢出次数 (缓冲区超容)
 - ✅ 吞吐量 (总托盘数/总卡车数)
-- ✅ 码头利用率 (按小时)
-- ✅ 场景对比分析
+- ✅ 码头利用率 (时变容量，按小时)
+- ✅ 场景对比分析 (4个运营时间场景)
 
 ### 输出文件
 ```
 outputs/
 ├── results/
 │   ├── simulation_results_comparison.xlsx  # 场景对比 ⭐
-│   └── simulation_details_*.xlsx          # 详细数据
+│   ├── dock_capacity_validation.txt        # 码头容量验证
+│   ├── pallet_distribution_validation.txt  # 托盘分布验证
+│   └── arrival_distribution_validation.txt # 到达分布验证
 └── figures/
-    ├── DC_Simulation_Architecture.jpg     # 架构流程图 ⭐
-    └── [其他图表]
+    ├── simulation_structure_diagram.png    # 架构流程图 ⭐
+    ├── dock_capacity_by_hour.png          # 时变码头容量
+    ├── pallet_distribution_*.png          # 托盘分布图
+    └── arrival_distribution_*.png         # 到达分布图
 ```
 
 ---
@@ -139,10 +146,14 @@ outputs/
 
 | 文档 | 说明 |
 |------|------|
-| [DC_SIMULATION_SUMMARY.md](docs/DC_SIMULATION_SUMMARY.md) | 📌 **推荐首读** - 模型完整总结 |
-| [PROJECT_STRUCTURE.md](docs/PROJECT_STRUCTURE.md) | 项目结构详解 |
-| [SIMULATION_ANALYSIS.md](docs/SIMULATION_ANALYSIS.md) | 技术细节分析 |
-| [架构流程图](outputs/figures/DC_Simulation_Architecture.jpg) | 可视化架构图 |
+| [SIMULATION_MODEL_OVERVIEW.md](docs/SIMULATION_MODEL_OVERVIEW.md) | 📌 **推荐首读** - 自然语言模型总览 (实体、资源、进程、事件、分布) |
+| [SIMULATION_MODEL_STRUCTURE.md](docs/SIMULATION_MODEL_STRUCTURE.md) | 📋 技术架构详解 (参数配置、代码结构、数据来源) |
+| [SIMULATION_ANALYSIS.md](docs/SIMULATION_ANALYSIS.md) | 📊 分析结果和技术细节 |
+| [架构流程图](outputs/figures/simulation_structure_diagram.png) | 🎨 可视化架构图 |
+| [验证报告](outputs/results/) | ✅ 参数验证报告 (码头、托盘、到达分布) |
+
+### 📂 历史文档 (archive/)
+所有参数修正过程、验证报告、旧版总结文档均已归档在 `docs/archive/`，包含完整的参数验证历程。
 
 ---
 
