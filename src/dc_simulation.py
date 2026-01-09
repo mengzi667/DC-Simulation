@@ -268,17 +268,24 @@ class FTEManager:
         
         返回: 团队总效率（托盘/小时）
         计算: 单人效率 × 分配人数
+        
+        注意: 团队规模基于总人数和码头数量的合理分配
+        - 考虑轮班制度（不是所有人同时工作）
+        - 考虑多个并发码头分摊人力
         """
         if category == 'R&P':
             mean = self.efficiency_params['rp_mean']
             std = self.efficiency_params['rp_std']
-            # R&P团队：28人，假设每个码头平均分配5-7人
-            team_size = 6
+            # R&P: 28人 ÷ (入库1+出库6最多) ≈ 4人/码头
+            # 考虑轮班，每班约6-8人服务一个码头
+            team_size = 8
         else:  # FG
             mean = self.efficiency_params['fg_mean']
             std = self.efficiency_params['fg_std']
-            # FG团队：97人，假设每个码头平均分配8-10人
-            team_size = 10
+            # FG: 97人 ÷ (入库2+出库1) ≈ 32人/码头
+            # 但FG出库只有1个码头，可能分配更多人
+            # 考虑轮班和其他活动，假设每班约15人服务出库码头
+            team_size = 15
         
         # 使用截断正态分布（避免负值或异常值）
         efficiency_per_person = np.random.normal(mean, std)
