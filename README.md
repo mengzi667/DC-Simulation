@@ -151,27 +151,4 @@ DC-Simulation/
 | [docs/SIMULATION_MODEL_STRUCTURE.md](docs/SIMULATION_MODEL_STRUCTURE.md) | 技术实现细节 |
 | [docs/SIMULATION_ANALYSIS.md](docs/SIMULATION_ANALYSIS.md) | 结果分析报告 |
 
-## 使用场景
-
-- **现状评估**: 运行Baseline了解当前配置表现
-- **优化决策**: 对比4个场景选择最佳方案
-- **敏感性分析**: 调整参数测试不同条件
-- **容量规划**: 评估资源需求（码头、人力）
-
-## 待办
-
-- [ ] 集成2024年历史数据
-- [ ] 添加成本分析模块
-- [ ] 实时监控仪表板
-- [ ] 更多自定义场景支持
-
-## 许可
-
-本项目仅用于学术研究目的。
-
----
-
-**版本**: v2.0  
-**最后更新**: 2026-01-10  
-**开发团队**: TU Delft Design Project
  
