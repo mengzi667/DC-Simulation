@@ -41,7 +41,7 @@ desktop.ini
 # Data files - DO NOT TRACK
 data/
 drive-download-*/
-doc/
+docs/doc
 
 # Simulation outputs
 outputs/results/*.xlsx

@@ -1,9 +1,5 @@
 """
-DC 运营时间缩短仿真模型 - SimPy 实现
-Distribution Center Operating Hours Reduction Simulation
-
-基于 FG 和 R&P 业务流程的离散事件仿真
-使用实际数据参数进行多场景对比分析
+DC运营时间缩短仿真模型 - 基于FG和R&P业务流程的离散事件仿真
 """
 
 import simpy
@@ -15,162 +11,228 @@ from collections import defaultdict
 import json
 import os
 
-# 设置输出路径
+plt.rcParams['font.sans-serif'] = ['Microsoft YaHei', 'SimHei', 'Arial Unicode MS']
+plt.rcParams['axes.unicode_minus'] = False
+
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 RESULTS_DIR = os.path.join(PROJECT_ROOT, 'outputs', 'results')
 FIGURES_DIR = os.path.join(PROJECT_ROOT, 'outputs', 'figures')
 
-# 确保目录存在
 os.makedirs(RESULTS_DIR, exist_ok=True)
 os.makedirs(FIGURES_DIR, exist_ok=True)
 
-# ==================== 配置参数 ====================
+def load_simulation_config(config_path='simulation_config.json'):
+    """加载仿真配置文件，不存在则使用默认参数"""
+    config_file = os.path.join(PROJECT_ROOT, config_path)
+    if os.path.exists(config_file):
+        print(f"加载配置文件: {config_file}")
+        with open(config_file, 'r', encoding='utf-8') as f:
+            loaded_config = json.load(f)
+        print("配置文件加载成功")
+        return loaded_config
+    else:
+        print(f"警告: 配置文件未找到: {config_file}")
+        print("  使用硬编码默认参数")
+        return None
+
+LOADED_CONFIG = load_simulation_config()
 
 SIMULATION_CONFIG = {
     'baseline': {
         'name': 'Baseline (06:00-24:00)',
         'dc_open_time': 6,
         'dc_close_time': 24,
-        'operating_hours': 18
+        'operating_hours': 18,
+        'arrival_smoothing': False 
     },
     'scenario_1': {
         'name': 'Scenario 1 (07:00-23:00)',
         'dc_open_time': 7,
         'dc_close_time': 23,
-        'operating_hours': 16
+        'operating_hours': 16,
+        'arrival_smoothing': False
     },
     'scenario_2': {
         'name': 'Scenario 2 (08:00-22:00)',
         'dc_open_time': 8,
         'dc_close_time': 22,
-        'operating_hours': 14
+        'operating_hours': 14,
+        'arrival_smoothing': False
     },
     'scenario_3': {
         'name': 'Scenario 3 (08:00-20:00)',
         'dc_open_time': 8,
         'dc_close_time': 20,
-        'operating_hours': 12
+        'operating_hours': 12,
+        'arrival_smoothing': False
+    },
+    'scenario_4': {
+        'name': 'Scenario 4: Arrival Optimized (07:00-23:00)',
+        'dc_open_time': 7,
+        'dc_close_time': 23,
+        'operating_hours': 16,
+        'arrival_smoothing': True
     }
 }
 
-# 基于实际数据的参数配置
-SYSTEM_PARAMETERS = {
-    # 生产效率参数（托盘/小时）
-    'efficiency': {
-        'rp_mean': 5.81,      # R&P 平均效率
-        'rp_std': 0.416,      # R&P 效率标准差
-        'fg_mean': 3.5,       # FG 平均效率（估算）
-        'fg_std': 0.5         # FG 效率标准差（估算）
-    },
+if LOADED_CONFIG:
+    SYSTEM_PARAMETERS = {
+        'efficiency': LOADED_CONFIG['efficiency'],
+        'factory_production': LOADED_CONFIG['factory_production'],
+        'buffer_capacity': LOADED_CONFIG['buffer_capacity'],
+        'truck_arrival_rates': LOADED_CONFIG['truck_arrival_rates'],
+    }
     
-    # 工厂生产速率（托盘/小时，24/7 连续）
-    'factory_production': {
-        'rp_rate': 23,        # R&P: 16,500/月 ≈ 23/小时
-        'fg_rate': 46         # FG: 33,000/月 ≈ 46/小时
-    },
-    
-    # 缓冲区容量
-    'buffer_capacity': {
-        'rp_trailers': 15,
-        'fg_trailers': 20,
-        'pallets_per_trailer': 33
-    },
-    
-    # 时变码头容量（基于48周Timeslot实际FG/R&P分类数据）
-    # 数据来源：Timeslot W1-W48.xlsx - 48周中位数
-    # 关键发现：R&P Loading需求远超业务量占比（装车复杂度更高）
-    'hourly_dock_capacity': {
-        # FG码头容量（实际数据）
-        'FG': {
-            'loading': {  # FG Loading（出库）
-                0: 0, 1: 0, 2: 0, 3: 0, 4: 0, 5: 0,
-                6: 1, 7: 1, 8: 1, 9: 1, 10: 1, 11: 1,
-                12: 1, 13: 1, 14: 1, 15: 1, 16: 1, 17: 1,
-                18: 1, 19: 1, 20: 1, 21: 1, 22: 1, 23: 1
+    # 加载码头容量（如果配置文件中有，否则使用默认值）
+    if 'hourly_dock_capacity' in LOADED_CONFIG:
+        SYSTEM_PARAMETERS['hourly_dock_capacity'] = LOADED_CONFIG['hourly_dock_capacity']
+        print("使用配置文件中的码头容量数据")
+    else:
+        print("警告: 配置文件缺少码头容量，使用硬编码默认值")
+        SYSTEM_PARAMETERS['hourly_dock_capacity'] = {
+            'FG': {
+                'loading': {0: 0, 1: 0, 2: 0, 3: 0, 4: 0, 5: 0,
+                           6: 1, 7: 1, 8: 1, 9: 1, 10: 1, 11: 1,
+                           12: 1, 13: 1, 14: 1, 15: 1, 16: 1, 17: 1,
+                           18: 1, 19: 1, 20: 1, 21: 1, 22: 1, 23: 1},
+                'reception': {0: 0, 1: 0, 2: 0, 3: 0, 4: 0, 5: 0,
+                             6: 2, 7: 2, 8: 2, 9: 2, 10: 2, 11: 2,
+                             12: 2, 13: 2, 14: 2, 15: 2, 16: 2, 17: 2,
+                             18: 2, 19: 2, 20: 2, 21: 2, 22: 1, 23: 0}
             },
-            'reception': {  # FG Reception（入库）
-                0: 0, 1: 0, 2: 0, 3: 0, 4: 0, 5: 0,
-                6: 2, 7: 2, 8: 2, 9: 2, 10: 2, 11: 2,
-                12: 2, 13: 2, 14: 2, 15: 2, 16: 2, 17: 2,
-                18: 2, 19: 2, 20: 2, 21: 2, 22: 1, 23: 0
-            }
-        },
-        # R&P码头容量（实际数据）
-        'R&P': {
-            'loading': {  # R&P Loading（出库）
-                0: 0, 1: 0, 2: 0, 3: 0, 4: 0, 5: 0,
-                6: 4, 7: 6, 8: 5, 9: 5, 10: 5, 11: 6,
-                12: 5, 13: 6, 14: 6, 15: 5, 16: 5, 17: 4,
-                18: 4, 19: 4, 20: 3, 21: 3, 22: 3, 23: 3
-            },
-            'reception': {  # R&P Reception（入库）
-                0: 0, 1: 0, 2: 0, 3: 0, 4: 0, 5: 0,
-                6: 1, 7: 1, 8: 1, 9: 1, 10: 1, 11: 1,
-                12: 1, 13: 1, 14: 1, 15: 1, 16: 1, 17: 1,
-                18: 1, 19: 1, 20: 1, 21: 1, 22: 1, 23: 1
+            'R&P': {
+                'loading': {0: 0, 1: 0, 2: 0, 3: 0, 4: 0, 5: 0,
+                           6: 4, 7: 6, 8: 5, 9: 5, 10: 5, 11: 6,
+                           12: 5, 13: 6, 14: 6, 15: 5, 16: 5, 17: 4,
+                           18: 4, 19: 4, 20: 3, 21: 3, 22: 3, 23: 3},
+                'reception': {0: 0, 1: 0, 2: 0, 3: 0, 4: 0, 5: 0,
+                             6: 1, 7: 1, 8: 1, 9: 1, 10: 1, 11: 1,
+                             12: 1, 13: 1, 14: 1, 15: 1, 16: 1, 17: 1,
+                             18: 1, 19: 1, 20: 1, 21: 1, 22: 1, 23: 1}
             }
         }
-    },
     
-    # 人力资源（基于KPI sheet实际工时数据）
-    # 来源：R&P平均4,538h/月 + FG平均17,094h/月 = 21,632h/月
-    # 计算：21,632 ÷ 176h/人/月 = 122.9 ≈ 125 FTE
-    'fte_total': 125,
-    'fte_allocation': {
-        'rp_baseline': 28,  # R&P: 4,538 ÷ 176 = 25.8 ≈ 28人
-        'fg_baseline': 97   # FG: 17,094 ÷ 176 = 97.1 ≈ 97人
-    },
-    
-    # 卡车到达参数（基于2025年全年Outbound Shipments实际数据）
-    # 来源：Total Shipments 2025.xlsx - Outbound统计（305天数据）
-    # 分类别的每小时到达率（混合模型：75%预约+25%临时）
-    # 验证结果：FG Var/Mean=0.48, R&P Var/Mean=0.30（不符合泊松分布）
-    # 实际到达比泊松分布更规律，使用混合模型更准确
-    # 全年实际数据：FG占69.3%（36.77辆/天），R&P占30.7%（16.27辆/天）
-    'truck_arrival_rates': {
-        'FG': {
-            # FG每小时平均到达卡车数（全年平均）
-            6: 1.62, 7: 2.8, 8: 2.47, 9: 2.61, 10: 3.15,
-            11: 3.21, 12: 3.16, 13: 3.01, 14: 2.9, 15: 2.6,
-            16: 2.65, 17: 2.11, 18: 1.82, 19: 1.59, 20: 0.7,
-            21: 0.23, 22: 0.15
-        },
-        'R&P': {
-            # R&P每小时平均到达卡车数（全年平均）
-            4: 0.0, 5: 0.0, 6: 0.77, 7: 1.13, 8: 1.13,
-            9: 1.14, 10: 0.96, 11: 1.08, 12: 0.78, 13: 0.83,
-            14: 0.95, 15: 0.99, 16: 0.87, 17: 0.87, 18: 0.94,
-            19: 1.42, 20: 0.77, 21: 0.75, 22: 0.52, 23: 0.36
+    # 加载托盘数分布（如果配置文件中有，否则使用默认值）
+    if 'pallets_distribution' in LOADED_CONFIG:
+        SYSTEM_PARAMETERS['pallets_distribution'] = LOADED_CONFIG['pallets_distribution']
+        print("使用配置文件中的托盘数分布数据")
+    else:
+        print("警告: 配置文件缺少托盘数分布，使用硬编码默认值")
+        SYSTEM_PARAMETERS['pallets_distribution'] = {
+            'FG': {'type': 'triangular', 'min': 1, 'mode': 33, 'max': 276, 'mean': 30.0, 'std': 12.3},
+            'R&P': {'type': 'triangular', 'min': 1, 'mode': 22, 'max': 560, 'mean': 22.7, 'std': 9.7}
         }
-    },
     
-    # 托盘数分布（基于2025年Total Shipments实际数据）
-    # 来源：Total Shipments 2025.xlsx - 33,280批次数据分析
-    # 数据特征：FG和R&P有明显不同的分布模式
-    'pallets_distribution': {
-        'FG': {
-            # FG: 22,276批次，均值30.0，标准差12.3，中位数33
-            'type': 'triangular',  # 使用三角分布（更接近实际）
-            'min': 1,
-            'mode': 33,      # 核密度估计的众数
-            'max': 276,
-            'mean': 30.0,    # 实际均值（用于验证）
-            'std': 12.3      # 实际标准差
+    # 加载人力资源数据（如果配置文件中有，否则使用默认值）
+    if 'fte_total' in LOADED_CONFIG and 'fte_allocation' in LOADED_CONFIG:
+        SYSTEM_PARAMETERS['fte_total'] = LOADED_CONFIG['fte_total']
+        SYSTEM_PARAMETERS['fte_allocation'] = LOADED_CONFIG['fte_allocation']
+        print("使用配置文件中的人力资源数据")
+    else:
+        print("警告: 配置文件缺少人力资源数据，使用硬编码默认值")
+        SYSTEM_PARAMETERS['fte_total'] = 125
+        SYSTEM_PARAMETERS['fte_allocation'] = {'rp_baseline': 28, 'fg_baseline': 97}
+
+else:
+    # 使用硬编码默认参数
+    SYSTEM_PARAMETERS = {
+        # 生产效率参数（托盘/小时）
+        'efficiency': {
+            'rp_mean': 5.81,      # R&P 平均效率
+            'rp_std': 0.416,      # R&P 效率标准差
+            'fg_mean': 3.5,       # FG 平均效率（估算）
+            'fg_std': 0.5         # FG 效率标准差（估算）
         },
-        'R&P': {
-            # R&P: 11,004批次，均值22.7，标准差9.7，中位数22
-            'type': 'triangular',
-            'min': 1,
-            'mode': 22,      # 核密度估计的众数
-            'max': 560,
-            'mean': 22.7,    # 实际均值
-            'std': 9.7       # 实际标准差
+        
+        # 工厂生产速率（托盘/小时，24/7 连续）
+        'factory_production': {
+            'rp_rate': 23,        # R&P: 16,500/月 ≈ 23/小时
+            'fg_rate': 46         # FG: 33,000/月 ≈ 46/小时
+        },
+        
+        # 缓冲区容量
+        'buffer_capacity': {
+            'rp_trailers': 15,
+            'fg_trailers': 20,
+            'pallets_per_trailer': 33
+        },
+        
+        # 时变码头容量（基于48周Timeslot实际FG/R&P分类数据）
+        # 数据来源：Timeslot W1-W48.xlsx - 48周中位数
+        # 关键发现：R&P Loading需求远超业务量占比（装车复杂度更高）
+        'hourly_dock_capacity': {
+            # FG码头容量（实际数据）
+            'FG': {
+                'loading': {  # FG Loading（出库）
+                    0: 0, 1: 0, 2: 0, 3: 0, 4: 0, 5: 0,
+                    6: 1, 7: 1, 8: 1, 9: 1, 10: 1, 11: 1,
+                    12: 1, 13: 1, 14: 1, 15: 1, 16: 1, 17: 1,
+                    18: 1, 19: 1, 20: 1, 21: 1, 22: 1, 23: 1
+                },
+                'reception': {  # FG Reception（入库）
+                    0: 0, 1: 0, 2: 0, 3: 0, 4: 0, 5: 0,
+                    6: 2, 7: 2, 8: 2, 9: 2, 10: 2, 11: 2,
+                    12: 2, 13: 2, 14: 2, 15: 2, 16: 2, 17: 2,
+                    18: 2, 19: 2, 20: 2, 21: 2, 22: 1, 23: 0
+                }
+            },
+            # R&P码头容量（实际数据）
+            'R&P': {
+                'loading': {  # R&P Loading（出库）
+                    0: 0, 1: 0, 2: 0, 3: 0, 4: 0, 5: 0,
+                    6: 4, 7: 6, 8: 5, 9: 5, 10: 5, 11: 6,
+                    12: 5, 13: 6, 14: 6, 15: 5, 16: 5, 17: 4,
+                    18: 4, 19: 4, 20: 3, 21: 3, 22: 3, 23: 3
+                },
+                'reception': {  # R&P Reception（入库）
+                    0: 0, 1: 0, 2: 0, 3: 0, 4: 0, 5: 0,
+                    6: 1, 7: 1, 8: 1, 9: 1, 10: 1, 11: 1,
+                    12: 1, 13: 1, 14: 1, 15: 1, 16: 1, 17: 1,
+                    18: 1, 19: 1, 20: 1, 21: 1, 22: 1, 23: 1
+                }
+            }
+        },
+        
+        'fte_total': 125,
+        'fte_allocation': {
+            'rp_baseline': 28,
+            'fg_baseline': 97
+        },
+        
+        'truck_arrival_rates': {
+            'FG': {
+                6: 1.62, 7: 2.8, 8: 2.47, 9: 2.61, 10: 3.15,
+                11: 3.21, 12: 3.16, 13: 3.01, 14: 2.9, 15: 2.6,
+                16: 2.65, 17: 2.11, 18: 1.82, 19: 1.59, 20: 0.7,
+                21: 0.23, 22: 0.15
+            },
+            'R&P': {
+                4: 0.0, 5: 0.0, 6: 0.77, 7: 1.13, 8: 1.13,
+                9: 1.14, 10: 0.96, 11: 1.08, 12: 0.78, 13: 0.83,
+                14: 0.95, 15: 0.99, 16: 0.87, 17: 0.87, 18: 0.94,
+                19: 1.42, 20: 0.77, 21: 0.75, 22: 0.52, 23: 0.36
+            }
+        },
+        
+        'pallets_distribution': {
+            'FG': {
+                'type': 'triangular',
+                'min': 1,
+                'mode': 33,
+                'max': 276,
+                'mean': 30.0,
+                'std': 12.3
+            },
+            'R&P': {
+                'type': 'triangular',
+                'min': 1,
+                'mode': 22,
+                'max': 560,
+                'mean': 22.7,
+                'std': 9.7
+            }
         }
     }
-}
-
-
-# ==================== 实体类定义 ====================
 
 class Truck:
     """卡车实体"""
@@ -193,7 +255,7 @@ class Truck:
 
 
 class Order:
-    """订单实体 - 用于跟踪SLA"""
+    """订单实体"""
     _id_counter = 0
     
     def __init__(self, pallets, order_time, departure_time):
@@ -329,12 +391,51 @@ class KPICollector:
             'pallets': pallets
         })
     
-    def record_truck_wait(self, truck):
-        wait_time = truck.service_start_time - truck.actual_arrival_time
+    def record_truck_wait(self, truck, dc_config):
+        """
+        记录卡车等待时间（仅统计DC开放时间内的等待）
+        
+        排除DC关闭时间，例如：
+        - 卡车23:00到达，第二天6:00开始服务
+        - 总等待7小时，但DC关闭时间6小时不应计入业务等待
+        - 实际业务等待 = 1小时（23:00-24:00）
+        """
+        total_wait = truck.service_start_time - truck.actual_arrival_time
+        
+        # 计算跨越了多少个完整的DC关闭周期
+        arrival_time = truck.actual_arrival_time
+        service_start = truck.service_start_time
+        
+        # 计算实际业务等待时间（排除DC关闭时间）
+        dc_open = dc_config['dc_open_time']
+        dc_close = dc_config['dc_close_time']
+        daily_closure_hours = 24 - dc_close + dc_open
+        
+        business_wait = 0
+        current_time = arrival_time
+        
+        while current_time < service_start:
+            current_hour = int(current_time) % 24
+            
+            # 如果当前在DC开放时间内
+            if dc_open <= current_hour < dc_close:
+                # 计算到关门或服务开始的时间（取较小值）
+                hours_until_close = dc_close - current_hour - (current_time % 1)
+                hours_until_service = service_start - current_time
+                hours_to_add = min(hours_until_close, hours_until_service)
+                business_wait += hours_to_add
+                current_time += hours_to_add
+            else:
+                # 当前在DC关闭时间内，跳到下一个开门时间
+                next_day_start = (int(current_time) // 24 + 1) * 24 + dc_open
+                current_time = next_day_start
+        
         self.truck_wait_times.append({
             'category': truck.category,
             'direction': truck.direction,
-            'wait_time': wait_time
+            'wait_time': business_wait,  # 只记录业务等待时间
+            'total_wait': total_wait,     # 保留总等待时间用于分析
+            'overnight': total_wait >= daily_closure_hours  # 标记是否跨夜
         })
     
     def record_sla_miss(self, order, actual_completion):
@@ -477,9 +578,17 @@ class DCSimulation:
         # 订单队列（FG Outbound）
         self.pending_orders = []
         
+        # 如果启用到达平滑化，计算优化后的到达率
+        if self.config.get('arrival_smoothing', False):
+            self.arrival_rates = self._smooth_arrival_rates(self.config)
+        else:
+            self.arrival_rates = SYSTEM_PARAMETERS['truck_arrival_rates']
+        
         print(f"初始化仿真: {scenario_config['name']}")
         print(f"  运营时间: {scenario_config['dc_open_time']:02d}:00 - {scenario_config['dc_close_time']:02d}:00")
         print(f"  运营小时数: {scenario_config['operating_hours']} 小时/天")
+        if self.config.get('arrival_smoothing', False):
+            print(f"  到达优化: 已启用（平滑高峰流量）")
     
     def _init_resources(self):
         """初始化仿真资源（时变码头容量）"""
@@ -533,6 +642,83 @@ class DCSimulation:
         
         # 人力资源管理器
         self.fte_manager = FTEManager(SYSTEM_PARAMETERS['fte_total'])
+    
+    def _smooth_arrival_rates(self, dc_config):
+        """
+        根据DC运营时间动态平滑到达率：限制高峰流量，分散到非高峰时段
+        
+        策略：
+        - FG高峰（10-13点）：从3.15降至1.75（服务能力）
+        - 超出部分**仅分配到DC开放时段内的低谷时段**
+        - R&P保持不变（无明显瓶颈）
+        """
+        original_rates = SYSTEM_PARAMETERS['truck_arrival_rates']
+        smoothed_rates = {
+            'FG': {},
+            'R&P': {}
+        }
+        
+        # R&P保持不变
+        smoothed_rates['R&P'] = original_rates['R&P'].copy()
+        
+        # FG平滑化
+        fg_rates = original_rates['FG'].copy()
+        
+        # 识别高峰时段
+        peak_hours = [10, 11, 12, 13]  # 10-13点（高峰拥堵）
+        
+        # **根据DC运营时间确定可转移的低谷时段**
+        dc_open = dc_config['dc_open_time']
+        dc_close = dc_config['dc_close_time']
+        
+        # 候选低谷时段：DC开放时间内，且到达率<2.0的时段
+        candidate_hours = []
+        for hour in range(dc_open, dc_close):
+            if hour in fg_rates and hour not in peak_hours:
+                # 排除已经接近高峰的时段（>2.0）和接近关门前2小时的时段
+                if fg_rates[hour] < 2.0 and hour < dc_close - 2:
+                    candidate_hours.append(hour)
+        
+        # 如果没有合适的候选时段，则不进行平滑
+        if not candidate_hours:
+            print("\n警告：当前运营时间内没有合适的低谷时段用于流量转移")
+            print(f"   运营时间: {dc_open}:00-{dc_close}:00")
+            print("   建议：延长运营时间或不启用到达优化")
+            return original_rates
+        
+        # 服务能力：1.75辆/小时
+        service_capacity = 1.75
+        
+        # 计算高峰超出量
+        total_excess = 0
+        for hour in peak_hours:
+            if hour in fg_rates and dc_open <= hour < dc_close:  # 仅处理DC开放时段的高峰
+                if fg_rates[hour] > service_capacity:
+                    excess = fg_rates[hour] - service_capacity
+                    total_excess += excess
+                    fg_rates[hour] = service_capacity
+        
+        # 将超出量**均匀**分配到候选低谷时段
+        if total_excess > 0 and candidate_hours:
+            per_hour_addition = total_excess / len(candidate_hours)
+            for hour in candidate_hours:
+                fg_rates[hour] += per_hour_addition
+        
+        smoothed_rates['FG'] = fg_rates
+        
+        # 打印优化效果
+        print("\n=== 到达率优化（根据运营时间动态调整） ===")
+        print(f"运营时间: {dc_open}:00-{dc_close}:00 ({dc_config['operating_hours']}小时)")
+        print(f"候选低谷时段: {candidate_hours}")
+        print(f"FG Loading 平滑化:")
+        for hour in sorted(fg_rates.keys()):
+            if dc_open <= hour < dc_close:  # 只显示运营时间内的调整
+                orig = original_rates['FG'].get(hour, 0)
+                smooth = fg_rates[hour]
+                if abs(orig - smooth) > 0.01:
+                    print(f"  {hour:02d}:00 - {orig:.2f} → {smooth:.2f} 辆/小时")
+        
+        return smoothed_rates
     
     def update_dock_capacity_process(self):
         """动态更新码头容量（按小时）"""
@@ -638,7 +824,8 @@ class DCSimulation:
         统计方法：分类别统计每小时实际到达卡车数的平均值
         全年实际数据（305天）：FG占69.3%（36.77辆/天），R&P占30.7%（16.27辆/天）
         """
-        arrival_rates = SYSTEM_PARAMETERS['truck_arrival_rates']
+        # 使用优化后的到达率（如果启用）
+        arrival_rates = self.arrival_rates
         
         while True:
             hour = int(self.env.now) % 24
@@ -745,8 +932,8 @@ class DCSimulation:
             
             truck.service_start_time = self.env.now
             
-            # 记录等待时间
-            self.kpi.record_truck_wait(truck)
+            # 记录等待时间（传入DC配置以排除关闭时间）
+            self.kpi.record_truck_wait(truck, self.config)
             
             # 获取团队效率并计算装车时间
             # efficiency: 团队总效率（托盘/小时）
@@ -944,7 +1131,7 @@ def visualize_results(comparison_df):
     plt.tight_layout()
     path1 = os.path.join(FIGURES_DIR, '1_sla_compliance_rate.png')
     plt.savefig(path1, dpi=300, bbox_inches='tight')
-    print(f"✓ SLA遵守率图已保存: {path1}")
+    print(f"SLA遵守率图已保存: {path1}")
     plt.close()
     
     # ========== 图2: 缓冲区溢出事件 ==========
@@ -965,7 +1152,7 @@ def visualize_results(comparison_df):
     plt.tight_layout()
     path2 = os.path.join(FIGURES_DIR, '2_buffer_overflow_events.png')
     plt.savefig(path2, dpi=300, bbox_inches='tight')
-    print(f"✓ 缓冲区溢出图已保存: {path2}")
+    print(f"缓冲区溢出图已保存: {path2}")
     plt.close()
     
     # ========== 图3: 平均卡车等待时间 ==========
@@ -986,7 +1173,7 @@ def visualize_results(comparison_df):
     plt.tight_layout()
     path3 = os.path.join(FIGURES_DIR, '3_avg_truck_wait_time.png')
     plt.savefig(path3, dpi=300, bbox_inches='tight')
-    print(f"✓ 等待时间图已保存: {path3}")
+    print(f"等待时间图已保存: {path3}")
     plt.close()
     
     # ========== 图4: 午夜积压 ==========
@@ -1007,7 +1194,7 @@ def visualize_results(comparison_df):
     plt.tight_layout()
     path4 = os.path.join(FIGURES_DIR, '4_midnight_backlog.png')
     plt.savefig(path4, dpi=300, bbox_inches='tight')
-    print(f"✓ 午夜积压图已保存: {path4}")
+    print(f"午夜积压图已保存: {path4}")
     plt.close()
     
     # ========== 图5: 缓冲区平均占用率 ==========
@@ -1031,7 +1218,7 @@ def visualize_results(comparison_df):
     plt.tight_layout()
     path5 = os.path.join(FIGURES_DIR, '5_buffer_occupancy.png')
     plt.savefig(path5, dpi=300, bbox_inches='tight')
-    print(f"✓ 缓冲区占用率图已保存: {path5}")
+    print(f"缓冲区占用率图已保存: {path5}")
     plt.close()
     
     # ========== 图6: 综合评分 ==========
@@ -1041,12 +1228,27 @@ def visualize_results(comparison_df):
     # 权重：SLA 40%, 缓冲溢出 20%, 等待时间 20%, 积压 20%
     normalized_scores = pd.DataFrame()
     normalized_scores['sla'] = comparison_df['sla_compliance_rate'] * 100
-    normalized_scores['buffer'] = 100 - (comparison_df['buffer_overflow_events'] / 
-                                          comparison_df['buffer_overflow_events'].max() * 100)
-    normalized_scores['wait'] = 100 - (comparison_df['avg_truck_wait_time'] / 
-                                        comparison_df['avg_truck_wait_time'].max() * 100)
-    normalized_scores['backlog'] = 100 - (comparison_df['avg_midnight_backlog_pallets'] / 
-                                           comparison_df['avg_midnight_backlog_pallets'].max() * 100)
+    
+    # 缓冲溢出：如果所有场景都是0，则都得满分100
+    buffer_max = comparison_df['buffer_overflow_events'].max()
+    if buffer_max > 0:
+        normalized_scores['buffer'] = 100 - (comparison_df['buffer_overflow_events'] / buffer_max * 100)
+    else:
+        normalized_scores['buffer'] = 100  # 所有场景都无溢出，都得满分
+    
+    # 等待时间：反向归一化（等待越短得分越高）
+    wait_max = comparison_df['avg_truck_wait_time'].max()
+    if wait_max > 0:
+        normalized_scores['wait'] = 100 - (comparison_df['avg_truck_wait_time'] / wait_max * 100)
+    else:
+        normalized_scores['wait'] = 100
+    
+    # 积压：反向归一化（积压越少得分越高）
+    backlog_max = comparison_df['avg_midnight_backlog_pallets'].max()
+    if backlog_max > 0:
+        normalized_scores['backlog'] = 100 - (comparison_df['avg_midnight_backlog_pallets'] / backlog_max * 100)
+    else:
+        normalized_scores['backlog'] = 100  # 所有场景都无积压，都得满分
     
     composite_score = (normalized_scores['sla'] * 0.4 + 
                        normalized_scores['buffer'] * 0.2 +
@@ -1054,7 +1256,7 @@ def visualize_results(comparison_df):
                        normalized_scores['backlog'] * 0.2)
     
     bars = ax.barh(scenario_labels, composite_score, 
-                   color=['#27ae60', '#f39c12', '#e67e22', '#c0392b'][:len(scenarios)])
+                   color=['#27ae60', '#f39c12', '#e67e22', '#c0392b', '#9b59b6'][:len(scenarios)])
     ax.set_xlabel('综合得分', fontsize=12)
     ax.set_title('综合性能评分\n(SLA 40%, 缓冲 20%, 等待 20%, 积压 20%)', 
                  fontsize=14, fontweight='bold', pad=20)
@@ -1069,7 +1271,7 @@ def visualize_results(comparison_df):
     plt.tight_layout()
     path6 = os.path.join(FIGURES_DIR, '6_composite_score.png')
     plt.savefig(path6, dpi=300, bbox_inches='tight')
-    print(f"✓ 综合评分图已保存: {path6}")
+    print(f"综合评分图已保存: {path6}")
     plt.close()
     
     print(f"{'='*70}")
@@ -1085,7 +1287,7 @@ if __name__ == '__main__':
     
     # 运行场景对比
     results, comparison_df = run_scenario_comparison(
-        scenarios_to_run=['baseline', 'scenario_1', 'scenario_2', 'scenario_3'],
+        scenarios_to_run=['baseline', 'scenario_1', 'scenario_2', 'scenario_3', 'scenario_4'],
         num_replications=3,  # 每个场景重复 3 次
         duration_days=30     # 仿真 30 天
     )
