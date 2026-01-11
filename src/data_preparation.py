@@ -1,7 +1,4 @@
-"""
-DC 仿真数据准备脚本
-从KPI、Shipments、Timeslot数据提取仿真参数
-"""
+﻿"""DC仿真数据准备脚本"""
 
 import pandas as pd
 import numpy as np
@@ -24,6 +21,88 @@ SHIPMENTS_FILE = DATA_DIR / 'Total Shipments 2025.xlsx'
 
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 FIGURES_DIR.mkdir(parents=True, exist_ok=True)
+
+FTE_DATA_FILE = DATA_DIR / 'Input FTE Data.txt'
+
+def extract_fte_from_file():
+    """从Input FTE Data.txt提取FTE配置"""
+    print("\n" + "=" * 60)
+    print("提取FTE配置")
+    print("=" * 60)
+    
+    if not FTE_DATA_FILE.exists():
+        print(f"警告: FTE数据文件不存在: {FTE_DATA_FILE}")
+        return None
+    
+    try:
+        with open(FTE_DATA_FILE, 'r', encoding='utf-8') as f:
+            content = f.read()
+        
+        # 解析FTE数据
+        fte_config = {
+            'FG': {},
+            'R&P': {}
+        }
+        
+        lines = content.split('\n')
+        current_category = None
+        
+        for line in lines:
+            line = line.strip()
+            
+            # 检查是否是FG行（FG: Inbound FTE: ...）
+            if line.startswith('FG:'):
+                current_category = 'FG'
+                # 直接从这行提取Inbound FTE
+                if 'Inbound FTE:' in line:
+                    parts = line.split('Inbound FTE:')
+                    if len(parts) > 1:
+                        value = float(parts[1].strip())
+                        fte_config['FG']['Inbound'] = value
+            elif line.startswith('R&P:'):
+                current_category = 'R&P'
+            elif 'Inbound FTE:' in line and current_category:
+                # 处理缩进的Inbound FTE行
+                value = float(line.split(':')[-1].strip())
+                fte_config[current_category]['Inbound'] = value
+            elif 'Outbound FTE:' in line and current_category:
+                value = float(line.split(':')[-1].strip())
+                fte_config[current_category]['Outbound'] = value
+            elif 'Before ready to load work efficiency:' in line and current_category:
+                parts = line.split(':')[-1].strip().split()
+                value = float(parts[0])
+                fte_config[current_category]['efficiency'] = value
+        
+        print(f"\n已读取FTE配置:")
+        print(f"  FG:")
+        print(f"    Inbound FTE: {fte_config['FG']['Inbound']}")
+        print(f"    Outbound FTE: {fte_config['FG']['Outbound']}")
+        print(f"    效率: {fte_config['FG']['efficiency']} pallet/FTE")
+        print(f"\n  R&P:")
+        print(f"    Inbound FTE: {fte_config['R&P']['Inbound']}")
+        print(f"    Outbound FTE: {fte_config['R&P']['Outbound']}")
+        print(f"    效率: {fte_config['R&P']['efficiency']} pallet/FTE")
+        
+        # 计算月度工时（22天 × 8小时）
+        hours_per_month = 176
+        
+        # 计算每小时处理能力
+        print(f"\n每小时处理能力（基准18小时运营）:")
+        for category in ['FG', 'R&P']:
+            for direction in ['Inbound', 'Outbound']:
+                fte = fte_config[category][direction]
+                efficiency = fte_config[category]['efficiency']
+                hourly_capacity = (fte * efficiency) / hours_per_month
+                print(f"  {category} {direction}: {hourly_capacity:.1f} pallet/h")
+        
+        return fte_config
+        
+    except Exception as e:
+        print(f"错误: 无法解析FTE数据文件 - {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+
 
 def extract_efficiency_parameters():
     """提取效率参数（托盘/小时）"""
@@ -143,11 +222,12 @@ def extract_demand_distribution(target_year=2025):
     print(f"  入库数据覆盖月份: {sorted(inbound_months.tolist())}")
     print(f"  出库数据覆盖月份: {sorted(outbound_months.tolist())}")
     
-    # 提取小时到达分布（Outbound，用于卡车到达率）
+    # 提取小时到达分布
     outbound_year['Hour'] = outbound_year['Date Hour appointement'].dt.hour
+    inbound_year['Hour'] = inbound_year['Date Hour appointement'].dt.hour
     
-    # 分类别统计
-    hourly_arrivals = {}
+    # 分类别统计 Outbound
+    hourly_arrivals_outbound = {}
     
     for category in ['FG', 'R&P']:
         category_data = outbound_year[outbound_year['Category'] == category]
@@ -157,11 +237,34 @@ def extract_demand_distribution(target_year=2025):
         num_days = category_data['Date Hour appointement'].dt.date.nunique()
         
         hourly_rate = (hourly_counts / num_days).to_dict()
-        hourly_arrivals[category] = hourly_rate
+        hourly_arrivals_outbound[category] = hourly_rate
         
         total_trucks = hourly_counts.sum()
         avg_per_day = total_trucks / num_days
         print(f"\n{category} 出库统计（全年）:")
+        print(f"  总卡车数: {total_trucks}")
+        print(f"  统计天数: {num_days}")
+        print(f"  平均每天: {avg_per_day:.2f} 辆")
+        print(f"  每小时平均到达卡车数:")
+        for hour in sorted(hourly_rate.keys()):
+            print(f"    {hour:02d}:00 - {hourly_rate[hour]:.2f}")
+    
+    # 分类别统计 Inbound
+    hourly_arrivals_inbound = {}
+    
+    for category in ['FG', 'R&P']:
+        category_data = inbound_year[inbound_year['Category'] == category]
+        
+        # 计算每小时平均到达卡车数（全年平均）
+        hourly_counts = category_data.groupby('Hour').size()
+        num_days = category_data['Date Hour appointement'].dt.date.nunique()
+        
+        hourly_rate = (hourly_counts / num_days).to_dict()
+        hourly_arrivals_inbound[category] = hourly_rate
+        
+        total_trucks = hourly_counts.sum()
+        avg_per_day = total_trucks / num_days
+        print(f"\n{category} 入库统计（全年）:")
         print(f"  总卡车数: {total_trucks}")
         print(f"  统计天数: {num_days}")
         print(f"  平均每天: {avg_per_day:.2f} 辆")
@@ -216,7 +319,8 @@ def extract_demand_distribution(target_year=2025):
     
     demand_distribution = {
         'hourly_arrival_rate': total_hourly_rate,
-        'hourly_arrival_by_category': hourly_arrivals,  # 保留分类别数据
+        'hourly_arrival_outbound': hourly_arrivals_outbound,
+        'hourly_arrival_inbound': hourly_arrivals_inbound,
         'daily_demand': daily_demand
     }
     
@@ -310,12 +414,9 @@ def visualize_hourly_arrival_pattern(hourly_rates):
 
 
 def extract_dock_capacity_from_timeslot():
-    """
-    从Timeslot数据提取码头容量（每小时）
-    完全参照Timeslot.py和Timeslot_yearly.py的处理逻辑
-    """
+    """从48周Timeslot数据提取每小时码头容量"""
     print("\n" + "=" * 60)
-    print("6. 提取码头容量数据（48周数据）")
+    print("提取码头容量数据")
     print("=" * 60)
     
     from openpyxl import load_workbook
@@ -438,14 +539,9 @@ def extract_dock_capacity_from_timeslot():
 
 
 def extract_pallet_distribution():
-    """
-    从 Total Shipments 分析托盘数分布
-    
-    Returns:
-        dict: 按类别分组的托盘数分布参数
-    """
+    """从Total Shipments分析托盘数分布"""
     print("\n" + "=" * 60)
-    print("7. 分析托盘数分布")
+    print("分析托盘数分布")
     print("=" * 60)
     
     # 读取 Inbound 和 Outbound 数据（实际sheet名称）
@@ -586,26 +682,12 @@ def extract_fte_from_kpi():
 
 
 def generate_simulation_config(efficiency_params, demand_distribution, 
-                                production_rates, buffer_requirements,
+                                production_rates,
                                 dock_capacity=None, pallet_distribution=None, 
-                                fte_data=None):
-    """
-    生成仿真配置文件
-    
-    Args:
-        efficiency_params: 效率参数
-        demand_distribution: 需求分布
-        production_rates: 生产速率
-        buffer_requirements: 缓冲区需求
-        dock_capacity: 码头容量（可选）
-        pallet_distribution: 托盘数分布（可选）
-        fte_data: 人力资源数据（可选）
-    
-    Returns:
-        dict: 完整的仿真配置
-    """
+                                fte_data=None, fte_config=None):
+    """生成完整的仿真配置文件"""
     print("\n" + "=" * 60)
-    print("9. 生成仿真配置文件")
+    print("生成仿真配置文件")
     print("=" * 60)
     
     # 辅助函数：将numpy类型转换为Python原生类型
@@ -637,13 +719,9 @@ def generate_simulation_config(efficiency_params, demand_distribution,
             'rp_rate': float(production_rates['R&P']['hourly_rate']),
             'fg_rate': float(production_rates['FG']['hourly_rate'])
         },
-        'buffer_capacity': {
-            'rp_trailers': int(buffer_requirements['R&P']['recommended_trailers']),
-            'fg_trailers': int(buffer_requirements['FG']['recommended_trailers']),
-            'pallets_per_trailer': 33
-        },
-        # 修复：使用分类别的到达率数据（与dc_simulation.py格式匹配）
-        'truck_arrival_rates': convert_to_native(demand_distribution['hourly_arrival_by_category']),
+        # 使用分类别的到达率数据（分Inbound和Outbound）
+        'truck_arrival_rates_outbound': convert_to_native(demand_distribution['hourly_arrival_outbound']),
+        'truck_arrival_rates_inbound': convert_to_native(demand_distribution['hourly_arrival_inbound']),
         'daily_demand': convert_to_native(demand_distribution['daily_demand'])
     }
     
@@ -661,13 +739,16 @@ def generate_simulation_config(efficiency_params, demand_distribution,
     else:
         print("警告: 托盘数分布未提取，仿真将使用默认值")
     
-    # 添加人力资源数据（如果已提取）
-    if fte_data is not None:
+    # 添加FTE配置（优先使用新版本从Input FTE Data.txt）
+    if fte_config is not None:
+        config['fte_config'] = convert_to_native(fte_config)
+        print("已包含FTE配置数据（从Input FTE Data.txt）")
+    elif fte_data is not None:
         config['fte_total'] = fte_data['fte_total']
         config['fte_allocation'] = fte_data['fte_allocation']
-        print("已包含人力资源数据")
+        print("已包含人力资源数据（旧版本）")
     else:
-        print("警告: 人力资源数据未提取，仿真将使用默认值")
+        print("警告: FTE数据未提取，仿真将使用默认值")
     
     # 添加数据来源信息
     config['data_source'] = {
@@ -726,23 +807,7 @@ def generate_simulation_config(efficiency_params, demand_distribution,
         })
         production_df.to_excel(writer, sheet_name='Production_Rate', index=False)
         
-        # 缓冲区需求
-        buffer_df = pd.DataFrame({
-            'Category': ['R&P', 'FG'],
-            'Required Trailers': [
-                buffer_requirements['R&P']['required_trailers'],
-                buffer_requirements['FG']['required_trailers']
-            ],
-            'Recommended Trailers': [
-                buffer_requirements['R&P']['recommended_trailers'],
-                buffer_requirements['FG']['recommended_trailers']
-            ],
-            'Accumulated Pallets (6hr)': [
-                buffer_requirements['R&P']['accumulated_pallets'],
-                buffer_requirements['FG']['accumulated_pallets']
-            ]
-        })
-        buffer_df.to_excel(writer, sheet_name='Buffer_Capacity', index=False)
+        # 缓冲区需求（已移除）
         
         # 每小时到达率
         arrival_df = pd.DataFrame({
@@ -767,6 +832,9 @@ def main():
     print("="*70)
     
     try:
+        # 0. 提取FTE配置（从Input FTE Data.txt） - 优先！
+        fte_config = extract_fte_from_file()
+        
         # 1. 提取效率参数（基于11个月数据）
         efficiency_params = extract_efficiency_parameters()
         
@@ -776,11 +844,11 @@ def main():
         # 3. 计算工厂生产速率
         production_rates = calculate_factory_production_rate(demand_distribution['daily_demand'])
         
-        # 4. 估算缓冲区容量
-        buffer_requirements = estimate_buffer_capacity_requirement(production_rates, dc_closed_hours=6)
+        # 4. 估算缓冲区容量（已移除）
+        # buffer_requirements = estimate_buffer_capacity_requirement(production_rates, dc_closed_hours=6)
         
-        # 5. 可视化
-        visualize_hourly_arrival_pattern(demand_distribution['hourly_arrival_rate'])
+        # 5. 可视化（已移除hourly_arrival_pattern.png生成）
+        # visualize_hourly_arrival_pattern(demand_distribution['hourly_arrival_rate'])
         
         # 6. 提取码头容量（48周数据）- 新增！
         print("\n提取额外数据维度...")
@@ -799,23 +867,24 @@ def main():
             print(f"警告: 分析托盘数分布失败: {e}")
             print("  将使用默认值")
         
-        # 8. 提取人力资源数据 - 新增！
+        # 8. 提取人力资源数据（旧版本，如果没有Input FTE Data.txt）
         fte_data = None
-        try:
-            fte_data = extract_fte_from_kpi()
-        except Exception as e:
-            print(f"警告: 提取人力资源数据失败: {e}")
-            print("  将使用默认值")
+        if not fte_config:
+            try:
+                fte_data = extract_fte_from_kpi()
+            except Exception as e:
+                print(f"警告: 提取人力资源数据失败: {e}")
+                print("  将使用默认值")
         
         # 9. 生成配置文件（包含所有数据）
         config = generate_simulation_config(
             efficiency_params, 
             demand_distribution, 
-            production_rates, 
-            buffer_requirements,
+            production_rates,
             dock_capacity=dock_capacity,
             pallet_distribution=pallet_distribution,
-            fte_data=fte_data
+            fte_data=fte_data,
+            fte_config=fte_config  # 新增：优先使用此配置
         )
         
         # 打印汇总
@@ -829,7 +898,7 @@ def main():
             extracted_params += 1
         if pallet_distribution:
             extracted_params += 1
-        if fte_data:
+        if fte_config or fte_data:
             extracted_params += 1
         
         print(f"\n已提取参数类别: {extracted_params}/7")
@@ -839,28 +908,29 @@ def main():
         print("  3. 缓冲区容量 (buffer_capacity)")
         print("  4. 卡车到达率 (truck_arrival_rates)")
         
-        if dock_capacity or pallet_distribution or fte_data:
+        if dock_capacity or pallet_distribution or fte_config or fte_data:
             print("\n扩展参数:")
         if dock_capacity:
             print("  5. 码头容量 (hourly_dock_capacity) - 96个值")
         if pallet_distribution:
             print("  6. 托盘数分布 (pallets_distribution) - 12个值")
-        if fte_data:
+        if fte_config:
+            print("  7. FTE配置 (fte_config) - 从Input FTE Data.txt")
+        elif fte_data:
             print("  7. 人力资源 (fte_total, fte_allocation) - 3个值")
         
-        if not all([dock_capacity, pallet_distribution, fte_data]):
+        if not all([dock_capacity, pallet_distribution, (fte_config or fte_data)]):
             print("\n缺失参数:")
             if not dock_capacity:
                 print("  - 码头容量 (仿真将使用硬编码估计值)")
             if not pallet_distribution:
                 print("  - 托盘数分布 (仿真将使用硬编码估计值)")
-            if not fte_data:
-                print("  - 人力资源 (仿真将使用硬编码估计值)")
+            if not (fte_config or fte_data):
+                print("  - FTE配置 (仿真将使用硬编码估计值)")
         
         print("\n生成的文件:")
         print(f"  1. {OUTPUT_DIR.relative_to(PROJECT_ROOT) / 'simulation_config.json'} - 仿真配置（JSON 格式）")
         print(f"  2. {OUTPUT_DIR.relative_to(PROJECT_ROOT) / 'simulation_parameters.xlsx'} - 参数汇总表（Excel）")
-        print(f"  3. {FIGURES_DIR.relative_to(PROJECT_ROOT) / 'hourly_arrival_pattern.png'} - 到达分布可视化")
         print("\n下一步:")
         print("  运行 dc_simulation.py 进行仿真分析")
         print("="*70 + "\n")
