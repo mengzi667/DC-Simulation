@@ -1,0 +1,125 @@
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% PART 1: CHAPTER 4 INSERTIONS (SIMULATION MODEL)
+% All tables, figures, and verification details for Chapter 4
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+%=============================================================================
+% INSERTION 1: FTE Configuration Table (Section 4.4)
+% LOCATION: After \subsection{Workforce (FTE) Configuration...} line ~380
+% FILE: docs/doc/4.txt
+% ACTION: Insert this table immediately after the subsection text
+%=============================================================================
+
+\begin{table}[h]
+    \centering
+    \caption{FTE configuration and productivity parameters (source: \texttt{data/Input FTE Data.txt}).}
+    \label{tab:ch4_fte_config}
+    \begin{tabular}{lccl}
+        \hline
+        \textbf{Category} & \textbf{Inbound FTE} & \textbf{Outbound FTE} & \textbf{Efficiency (pallet/FTE)} \\
+        \hline
+        FG   & 44.75  & 44.75  & 665.43  \\
+        R\&P & 10.025 & 10.025 & 1308.83 \\
+        \hline
+    \end{tabular}
+    \\[0.3cm]
+    \footnotesize \textit{Note: Efficiency represents before-ready-to-load work efficiency.}
+\end{table}
+
+%=============================================================================
+% INSERTION 2: Arrival Stochasticity Table (Section 4.4.2)
+% LOCATION: Replace placeholder \label{tab:arrival_stochasticity} line ~200
+% FILE: docs/doc/4.txt
+% ACTION: Find the empty table placeholder and replace with this
+%=============================================================================
+
+\begin{table}[h]
+    \centering
+    \caption{Arrival stochasticity by flow direction and category.}
+    \label{tab:arrival_stochasticity}
+    \begin{tabular}{llll}
+        \hline
+        \textbf{Flow} & \textbf{Category} & \textbf{Hourly count model} & \textbf{Within-hour spreading} \\
+        \hline
+        Inbound  & FG   & Poisson($\lambda_h$) & Exp(0.25 hr) \\
+        Inbound  & R\&P & Poisson($\lambda_h$) & Exp(0.25 hr) \\
+        Outbound & FG   & Scheduled + Poisson & Exp(0.25 hr) \\
+        Outbound & R\&P & Scheduled + Poisson & Exp(0.25 hr) \\
+        \hline
+    \end{tabular}
+    \\[0.2cm]
+    \footnotesize \textit{Note: Scheduled fraction determined by variance-to-mean ratio; remaining demand sampled as Poisson.}
+\end{table}
+
+%=============================================================================
+% INSERTION 3: Model Architecture Diagram (Section 4.3.5)
+% LOCATION: Replace placeholder \label{fig:ch4_architecture_overview} line ~150
+% FILE: docs/doc/4.txt
+% ACTION: Replace the commented-out includegraphics with this TikZ diagram
+% REQUIRES: \usepackage{tikz}, \usetikzlibrary{shapes,arrows,positioning}
+%=============================================================================
+
+\begin{figure}[h]
+    \centering
+    \begin{tikzpicture}[
+        node distance=1.5cm,
+        box/.style={rectangle, draw, text width=3cm, text centered, rounded corners, minimum height=1cm},
+        process/.style={rectangle, draw, fill=blue!20, text width=3.5cm, text centered, minimum height=1cm},
+        resource/.style={rectangle, draw, fill=orange!20, text width=2.5cm, text centered, minimum height=0.8cm},
+        arrow/.style={->, thick}
+    ]
+        % Main flow
+        \node[box] (arrival) {Truck Arrival\\(Hourly Poisson)};
+        \node[process, below of=arrival] (processing) {Internal Processing\\(FTE-constrained)};
+        \node[process, below of=processing] (dock) {Dock Service\\(Timeslot-constrained)};
+        \node[box, below of=dock] (departure) {Truck Departure};
+        
+        % Resources
+        \node[resource, right=4cm of processing] (fte) {FTE\\Capacity};
+        \node[resource, right=4cm of dock] (timeslot) {Timeslot\\Capacity};
+        
+        % Parallel processes
+        \node[box, left=4cm of processing, fill=green!15] (hourly) {Hourly\\Manager};
+        \node[box, left=4cm of dock, fill=green!15] (monitor) {KPI\\Monitoring};
+        
+        % Arrows - Main flow
+        \draw[arrow] (arrival) -- (processing);
+        \draw[arrow] (processing) -- node[right] {Ready} (dock);
+        \draw[arrow] (dock) -- (departure);
+        
+        % Resource constraints
+        \draw[arrow, dashed, red] (fte) -- node[above] {Constrains} (processing);
+        \draw[arrow, dashed, red] (timeslot) -- node[above] {Constrains} (dock);
+        
+        % Parallel processes
+        \draw[arrow, dotted] (hourly) -- (processing);
+        \draw[arrow, dotted] (monitor) -- (dock);
+        
+    \end{tikzpicture}
+    \caption{Model architecture overview: entities, capacity constraints, and concurrent processes.}
+    \label{fig:ch4_architecture_overview}
+\end{figure}
+
+%=============================================================================
+% INSERTION 4: Verification Details (Section 4.8.1)
+% LOCATION: Replace comment /* Lines 379-381 omitted */ line ~620
+% FILE: docs/doc/4.txt
+% ACTION: Delete the comment and insert this itemize list
+%=============================================================================
+
+\begin{itemize}
+    \item Arrival rate consistency: verified that hourly arrival counts match configured $\lambda_h$ distributions
+    \item Capacity enforcement: verified that dock usage never exceeds available capacity during opening hours
+    \item Correct triggering of waiting and queuing behavior
+    \item FTE scaling: verified proportional reduction of processing capacity under shorter opening hours
+    \item Deadline assignment: verified G2/ROW split (80/20) and correct deadline calculation
+    \item Resource utilization: confirmed that utilization metrics align with observed dock usage patterns
+\end{itemize}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% END OF CHAPTER 4 INSERTIONS
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+% REQUIRED PACKAGES (add to preamble if not already present):
+% \usepackage{tikz}
+% \usetikzlibrary{shapes,arrows,positioning}

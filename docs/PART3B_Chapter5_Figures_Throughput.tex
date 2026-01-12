@@ -1,0 +1,76 @@
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% PART 3B: CHAPTER 5 FIGURES - THROUGHPUT (Figures 4, 4b, 4c, 4d)
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+%=============================================================================
+% FIGURE 4: Flow Statistics (Pallets) - Main Throughput ⭐⭐
+% LOCATION: Section 5.5.5 (Throughput Results)
+% FILE: docs/doc/5.txt
+% ACTION: Replace \label{fig:ch5_throughput_pallets} placeholder
+%=============================================================================
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=0.9\textwidth]{../outputs/figures/4_flow_statistics.png}
+    \caption{Total throughput (pallets) by category and direction. Stacked bars show FG and R\&P flows for inbound and outbound operations. Data annotations display pallet volumes.}
+    \label{fig:ch5_throughput_pallets}
+\end{figure}
+
+\textbf{Analysis:} Figure~\ref{fig:ch5_throughput_pallets} reveals that total inbound pallet throughput remains stable (113k--120k pallets), while outbound throughput decreases with shorter opening hours (from 131k in Baseline to 106k in Scenario 3). This 19\% reduction in outbound volume indicates that shorter windows constrain system capacity to clear outbound demand, despite inbound arrivals being largely accommodated.
+
+%=============================================================================
+% FIGURE 4b: FG Outbound by Region (Pallets) ⭐
+% LOCATION: Section 5.5.5, after Figure 4
+% FILE: docs/doc/5.txt
+% ACTION: Replace \label{fig:ch5_throughput_region} placeholder
+%=============================================================================
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=0.85\textwidth]{../outputs/figures/4b_fg_outbound_by_region.png}
+    \caption{FG outbound throughput by destination region (pallets). G2 region accounts for approximately 80\% of FG volume, consistent with configured regional distribution.}
+    \label{fig:ch5_throughput_region}
+\end{figure}
+
+\textbf{Analysis:} The regional split remains stable across scenarios (79.7--80.3\% G2, ~20\% ROW), confirming that the arrival generation mechanism correctly implements the 80/20 G2/ROW distribution. Both regions experience proportional throughput reductions as opening hours decrease.
+
+%=============================================================================
+% FIGURE 4c: Orders vs Pallets Flow Comparison ⭐⭐ (MAIN BODY PER USER REQUEST)
+% LOCATION: Section 5.5.5 - NEW SUBSECTION
+% FILE: docs/doc/5.txt
+% ACTION: Create new subsubsection with title and figure
+%=============================================================================
+
+\subsubsection{Order Count versus Pallet Volume}
+\label{subsubsec:ch5_orders_pallets}
+
+To support operational planning, Figure~\ref{fig:ch5_orders_pallets} presents a dual-metric view of throughput, comparing pallet volumes with order counts.
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=0.9\textwidth]{../outputs/figures/4c_flow_statistics_orders.png}
+    \caption{Comparison of pallet volume (left bars) versus order count (right bars) across categories. Data annotations show both metrics for each category and direction.}
+    \label{fig:ch5_orders_pallets}
+\end{figure}
+
+\textbf{Analysis:} The pallet-to-order ratios remain consistent across scenarios: FG outbound averages ~100 pallets/order, while R\&P outbound averages ~190 pallets/order. This consistency validates the pallet-load distribution sampling mechanism and confirms that operational dynamics are not distorted by stochastic variations in truck sizing.
+
+%=============================================================================
+% FIGURE 4d: FG Outbound Orders by Region ⭐ (MAIN BODY PER USER REQUEST)
+% LOCATION: Section 5.5.5, after Figure 4c
+% FILE: docs/doc/5.txt
+% ACTION: Insert immediately after 4c
+%=============================================================================
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=0.85\textwidth]{../outputs/figures/4d_fg_outbound_orders_by_region.png}
+    \caption{FG outbound order counts by destination region. G2 region handles 483--578 orders per 30-day period, while ROW handles 119--144 orders.}
+    \label{fig:ch5_outbound_orders_region}
+\end{figure}
+
+\textbf{Analysis:} Order count reductions follow pallet volume trends: Scenario 3 processes 17\% fewer FG orders than Baseline (604 vs 721 orders). The G2/ROW order split (~80/20) mirrors the pallet distribution, confirming uniform pallet-load distributions across regions.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% END OF PART 3B - Continue with utilization figures in next file
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
