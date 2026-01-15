@@ -82,17 +82,14 @@ if LOADED_CONFIG:
         'truck_arrival_rates_inbound': LOADED_CONFIG.get('truck_arrival_rates_inbound', {}),
     }
     
-    # 加载码头容量（如果配置文件中有，否则使用默认值）
+    # 加载码头容量
     if 'hourly_dock_capacity' in LOADED_CONFIG:
         loaded_capacity = LOADED_CONFIG['hourly_dock_capacity']
-        # 标准化键名：RP → R&P
         SYSTEM_PARAMETERS['hourly_dock_capacity'] = {
             'FG': loaded_capacity['FG'],
             'R&P': loaded_capacity.get('R&P', loaded_capacity.get('RP', {}))
         }
-        print("使用配置文件中的码头容量数据")
     else:
-        print("警告: 配置文件缺少码头容量，使用硬编码默认值")
         SYSTEM_PARAMETERS['hourly_dock_capacity'] = {
             'FG': {
                 'loading': {0: 0, 1: 0, 2: 0, 3: 0, 4: 0, 5: 0,
@@ -116,26 +113,30 @@ if LOADED_CONFIG:
             }
         }
     
-    # 加载托盘数分布（如果配置文件中有，否则使用默认值）
+    # 加载托盘数分布
     if 'pallets_distribution' in LOADED_CONFIG:
         SYSTEM_PARAMETERS['pallets_distribution'] = LOADED_CONFIG['pallets_distribution']
-        print("使用配置文件中的托盘数分布数据")
     else:
-        print("警告: 配置文件缺少托盘数分布，使用硬编码默认值")
         SYSTEM_PARAMETERS['pallets_distribution'] = {
             'FG': {'type': 'triangular', 'min': 1, 'mode': 33, 'max': 276, 'mean': 30.0, 'std': 12.3},
             'R&P': {'type': 'triangular', 'min': 1, 'mode': 22, 'max': 560, 'mean': 22.7, 'std': 9.7}
         }
     
-    # 加载人力资源数据（如果配置文件中有，否则使用默认值）
+    # 加载人力资源数据
     if 'fte_total' in LOADED_CONFIG and 'fte_allocation' in LOADED_CONFIG:
         SYSTEM_PARAMETERS['fte_total'] = LOADED_CONFIG['fte_total']
         SYSTEM_PARAMETERS['fte_allocation'] = LOADED_CONFIG['fte_allocation']
-        print("使用配置文件中的人力资源数据")
     else:
-        print("警告: 配置文件缺少人力资源数据，使用硬编码默认值")
         SYSTEM_PARAMETERS['fte_total'] = 125
         SYSTEM_PARAMETERS['fte_allocation'] = {'rp_baseline': 28, 'fg_baseline': 97}
+    
+    # 加载订单数据和opening hour coefficient
+    if 'generated_orders_path' in LOADED_CONFIG:
+        SYSTEM_PARAMETERS['generated_orders_path'] = LOADED_CONFIG['generated_orders_path']
+    if 'opening_hour_coefficient' in LOADED_CONFIG:
+        SYSTEM_PARAMETERS['opening_hour_coefficient'] = LOADED_CONFIG['opening_hour_coefficient']
+    else:
+        SYSTEM_PARAMETERS['opening_hour_coefficient'] = 1.0
 
 else:
     # 使用硬编码默认参数
@@ -161,13 +162,10 @@ else:
             'pallets_per_trailer': 33
         },
         
-        # 时变码头容量（基于48周Timeslot实际FG/R&P分类数据）
-        # 数据来源：Timeslot W1-W48.xlsx - 48周中位数
-        # 关键发现：R&P Loading需求远超业务量占比（装车复杂度更高）
+        # 码头容量（按小时）
         'hourly_dock_capacity': {
-            # FG码头容量（实际数据）
             'FG': {
-                'loading': {  # FG Loading（出库）
+                'loading': {
                     0: 0, 1: 0, 2: 0, 3: 0, 4: 0, 5: 0,
                     6: 1, 7: 1, 8: 1, 9: 1, 10: 1, 11: 1,
                     12: 1, 13: 1, 14: 1, 15: 1, 16: 1, 17: 1,
@@ -180,9 +178,8 @@ else:
                     18: 2, 19: 2, 20: 2, 21: 2, 22: 1, 23: 0
                 }
             },
-            # R&P码头容量（实际数据）
             'R&P': {
-                'loading': {  # R&P Loading（出库）
+                'loading': {
                     0: 0, 1: 0, 2: 0, 3: 0, 4: 0, 5: 0,
                     6: 4, 7: 6, 8: 5, 9: 5, 10: 5, 11: 6,
                     12: 5, 13: 6, 14: 6, 15: 5, 16: 5, 17: 4,
@@ -251,116 +248,56 @@ else:
         }
     }
 
-class Truck:
-    """卡车实体（代表一个订单）"""
-    _id_counter = 0
-    
-    def __init__(self, category, direction, pallets, scheduled_time, region=None):
-        Truck._id_counter += 1
-        self.id = Truck._id_counter
-        self.category = category  # FG or R&P
-        self.direction = direction  # Inbound or Outbound
-        self.pallets = pallets
-        self.scheduled_time = scheduled_time
-        self.actual_arrival_time = None
-        self.region = region  # G2 or ROW (FG Outbound only)
-        self.departure_deadline = None
-        self.has_time_constraint = False  # For SLA calculation
-        self.processing_start_time = None
-        self.processing_end_time = None
-        self.service_start_time = None  # Timeslot start
-        self.service_end_time = None    # Timeslot end
-        self.processing_deadline = None  # 24h inbound deadline
-        self.is_delayed = False
-        self.delay_hours = 0
-        
-    def __repr__(self):
-        if self.region:
-            return f"Truck-{self.id}({self.category}-{self.direction}, {self.pallets}p, {self.region})"
-        return f"Truck-{self.id}({self.category}-{self.direction}, {self.pallets}p)"
-
-
 class Order:
-    """订单实体"""
+    """订单实体（新逻辑：基于预生成数据）"""
     _id_counter = 0
     
-    def __init__(self, pallets, order_time, departure_time, has_time_constraint=False, region=None):
+    def __init__(self, order_data):
+        """
+        Args:
+            order_data: dict，从generated_orders.json加载的订单记录
+        """
         Order._id_counter += 1
         self.id = Order._id_counter
-        self.pallets = pallets
-        self.order_time = order_time
-        self.departure_time = departure_time
-        self.completion_time = None
-        self.has_time_constraint = has_time_constraint
-        self.region = region  # G2 or ROW
+        
+        # 基础属性
+        self.order_id = order_data['order_id']
+        self.month = order_data['month']
+        self.day = order_data['day']
+        self.category = order_data['category']
+        self.direction = order_data['direction']
+        self.pallets = order_data['pallets']
+        
+        # Outbound特有属性
+        if self.direction == 'Outbound':
+            self.region = order_data.get('region')  # 'G2_same_day', 'G2_next_day', 'ROW_next_day'
+            self.creation_hour = order_data.get('creation_hour')  # 相对当天的小时
+            self.creation_time = None  # 绝对仿真时间，后续计算
+            self.preparation_started = False
+            self.preparation_completed = False
+            self.preparation_pallets_done = 0
+        
+        # Inbound/Outbound通用
+        self.timeslot_hour = order_data.get('timeslot_hour')
+        self.timeslot_time = None  # 绝对仿真时间，后续计算
+        
+        # 状态跟踪
+        self.actual_timeslot = None  # 实际分配的timeslot（可能因延误改变）
+        self.on_time = True  # 是否按原timeslot完成
+        self.delay_hours = 0
+        self.processing_start_time = None
+        self.processing_end_time = None
+        self.completed = False
         
     def __repr__(self):
-        return f"Order-{self.id}({self.pallets}p, deadline:{self.departure_time})"
-
-
-# ==================== 资源管理器 ====================
-
-class TrailerBuffer:
-    """挂车缓冲区管理"""
-    def __init__(self, env, category, max_trailers, pallets_per_trailer):
-        self.env = env
-        self.category = category
-        self.max_capacity = max_trailers * pallets_per_trailer
-        self.current_pallets = 0
-        self.queue = []  # FIFO 队列
-        self.overflow_count = 0
-        self.total_overflow_pallets = 0
-        
-    def add(self, pallets, timestamp):
-        """添加托盘到缓冲区"""
-        if self.current_pallets + pallets <= self.max_capacity:
-            self.queue.append({'pallets': pallets, 'timestamp': timestamp})
-            self.current_pallets += pallets
-            return True
-        else:
-            # 缓冲区满，记录溢出
-            self.overflow_count += 1
-            self.total_overflow_pallets += pallets
-            return False
-    
-    def release(self, max_pallets):
-        """从缓冲区释放托盘（FIFO）"""
-        released_pallets = 0
-        while self.queue and released_pallets < max_pallets:
-            batch = self.queue[0]
-            if released_pallets + batch['pallets'] <= max_pallets:
-                released = self.queue.pop(0)
-                released_pallets += released['pallets']
-                self.current_pallets -= released['pallets']
-            else:
-                # 部分释放
-                remaining = max_pallets - released_pallets
-                self.queue[0]['pallets'] -= remaining
-                self.current_pallets -= remaining
-                released_pallets += remaining
-                break
-        
-        return released_pallets
-    
-    def get_occupancy_rate(self):
-        """获取当前占用率"""
-        return self.current_pallets / self.max_capacity if self.max_capacity > 0 else 0
+        if self.direction == 'Outbound':
+            return f"Order-{self.id}({self.category}-OUT, {self.pallets}p, {self.region}, slot={self.timeslot_hour})"
+        return f"Order-{self.id}({self.category}-IN, {self.pallets}p, slot={self.timeslot_hour})"
 
 
 class FTEManager:
-    """人力资源管理器（成本节约型：FTE按运营时长比例调整）
-    
-    基于Input FTE Data.txt的固定配置：
-    - FG: Inbound 44.75 FTE, Outbound 44.75 FTE, 效率 665.43 pallet/FTE
-    - R&P: Inbound 10.025 FTE, Outbound 10.025 FTE, 效率 1308.83 pallet/FTE
-    - 1 FTE = 1人 × 8小时/天 × 22天/月 = 176小时/月
-    """
+    """人力资源管理器 - FTE 按运营时长调整"""
     def __init__(self, operating_hours=18):
-        """
-        Args:
-            operating_hours: 每天运营小时数（默认18小时，即Baseline）
-        """
-        # 尝试从配置文件加载FTE配置
         if LOADED_CONFIG and 'fte_config' in LOADED_CONFIG:
             fte_config = LOADED_CONFIG['fte_config']
             self.baseline_fte = {
@@ -377,9 +314,8 @@ class FTEManager:
                 'FG': fte_config['FG']['efficiency'],
                 'R&P': fte_config['R&P']['efficiency']
             }
-            print("  使用配置文件中的FTE数据")
         else:
-            # 使用硬编码默认值（从Input FTE Data.txt）
+            # 使用硬编码默认值
             self.baseline_fte = {
                 'FG': {'Inbound': 44.75, 'Outbound': 44.75},
                 'R&P': {'Inbound': 10.025, 'Outbound': 10.025}
@@ -390,16 +326,10 @@ class FTEManager:
             }
             print("  使用硬编码FTE默认值")
         
-        # 月度工时（22天 × 8小时）
+        # 月度工时和运营参数
         self.hours_per_month = 176
-        
-        # 基准运营时长
         self.baseline_hours = 18
-        
-        # 实际运营时长
         self.operating_hours = operating_hours
-        
-        # 计算调整后的FTE（按比例减少）
         self.operating_ratio = operating_hours / self.baseline_hours
         self.adjusted_fte = self._calculate_adjusted_fte()
         
@@ -413,24 +343,17 @@ class FTEManager:
                 adjusted[category][direction] = base * self.operating_ratio
         return adjusted
     
-    def get_hourly_capacity(self, category, direction):
-        """获取每小时处理能力（托盘/小时）
+    def get_hourly_capacity(self, category, direction, coefficient=1.0):
+        """每小时处理能力（托盘/小时）
         
-        计算公式：(调整后FTE × 效率) / 月度工时
-        注意：人员密度保持不变，因此每小时处理能力与baseline相同
-        
-        Returns:
-            float: 托盘/小时
+        公式: (调整FTE × 效率) / 月度工时 × coefficient
         """
-        # 使用调整后的FTE
         fte = self.adjusted_fte[category][direction]
         efficiency = self.efficiency_per_fte[category]
-        
-        # 基础每小时容量
         base_capacity = (fte * efficiency) / self.hours_per_month
-        
-        # 考虑随机波动（±5%，模拟日常效率变化）
-        actual_capacity = base_capacity * np.random.uniform(0.95, 1.05)
+        adjusted_capacity = base_capacity * coefficient
+        # 随机波动 ±5%
+        actual_capacity = adjusted_capacity * np.random.uniform(0.95, 1.05)
         
         return actual_capacity
     
@@ -611,6 +534,31 @@ class KPICollector:
             'pending_pallets': pending_pallets
         })
     
+    def record_outbound_truck(self, order_data):
+        """记录Outbound订单完成（新逻辑）"""
+        self.outbound_operations.append({
+            'category': order_data['category'],
+            'pallets': order_data['pallets'],
+            'region': order_data['region'],
+            'on_time': order_data['on_time'],
+            'delay_hours': order_data.get('delay_hours', 0),
+            'service_time': order_data['service_time'],
+            'completion_time': order_data['completion_time'],
+            'order_count': 1
+        })
+    
+    def record_inbound_truck(self, order_data):
+        """记录Inbound订单完成（新逻辑）"""
+        self.inbound_operations.append({
+            'category': order_data['category'],
+            'pallets': order_data['pallets'],
+            'arrival_time': order_data['arrival_time'],
+            'processing_time': order_data['processing_time'],
+            'missed_deadline': order_data.get('missed_deadline', False),
+            'order_count': 1,
+            'from_buffer': False  # 新逻辑中无buffer
+        })
+    
     def generate_summary(self):
         """生成汇总报告"""
         summary = {}
@@ -628,31 +576,19 @@ class KPICollector:
             summary['max_truck_wait_time'] = 0
             summary['p95_truck_wait_time'] = 0
         
-        # SLA 统计（仅时间受限订单）
-        constrained_orders = [o for o in self.completed_orders if o.get('has_time_constraint', False)]
-        total_constrained = len(constrained_orders)
-        if total_constrained > 0:
-            on_time_orders = sum(1 for o in constrained_orders if o['on_time'])
-            summary['sla_compliance_rate'] = on_time_orders / total_constrained
-            summary['sla_miss_rate'] = 1 - summary['sla_compliance_rate']
-            summary['total_sla_misses'] = len(self.sla_misses)
-            summary['total_constrained_orders'] = total_constrained
-        else:
-            summary['sla_compliance_rate'] = 1.0
-            summary['sla_miss_rate'] = 0.0
-            summary['total_sla_misses'] = 0
-            summary['total_constrained_orders'] = 0
-        
-        # 按地区统计 SLA
+        # 按地区统计准时率（FG Outbound）
+        fg_outbound_completed = [o for o in self.outbound_operations if o['category'] == 'FG']
         for region in ['G2', 'ROW']:
-            region_constrained = [o for o in constrained_orders if o.get('region') == region]
-            if region_constrained:
-                region_on_time = sum(1 for o in region_constrained if o['on_time'])
-                summary[f'{region}_sla_compliance_rate'] = region_on_time / len(region_constrained)
-                summary[f'{region}_total_constrained_orders'] = len(region_constrained)
+            # 匹配region前缀（G2_same_day, G2_next_day, ROW_next_day都应该匹配）
+            region_orders = [o for o in fg_outbound_completed 
+                            if o.get('region', '').startswith(region)]
+            if region_orders:
+                region_on_time = sum(1 for o in region_orders if o['on_time'])
+                summary[f'{region}_on_time_rate'] = region_on_time / len(region_orders)
+                summary[f'{region}_total_orders'] = len(region_orders)
             else:
-                summary[f'{region}_sla_compliance_rate'] = 1.0
-                summary[f'{region}_total_constrained_orders'] = 0
+                summary[f'{region}_on_time_rate'] = 0.0
+                summary[f'{region}_total_orders'] = 0
         
         # Inbound 24h 延期统计
         if self.inbound_delays:
@@ -699,7 +635,8 @@ class KPICollector:
         # 按地区统计 FG 出库
         fg_outbound = [o for o in self.outbound_operations if o['category'] == 'FG']
         for region in ['G2', 'ROW']:
-            fg_region = [o for o in fg_outbound if o.get('region') == region]
+            # 匹配region前缀（G2_same_day, G2_next_day, ROW_next_day都应该匹配）
+            fg_region = [o for o in fg_outbound if o.get('region', '').startswith(region)]
             summary[f'FG_{region}_outbound_pallets'] = sum(o['pallets'] for o in fg_region)
             summary[f'FG_{region}_outbound_orders'] = sum(o.get('order_count', 1) for o in fg_region)
         
@@ -797,6 +734,12 @@ class KPICollector:
     def export_to_excel(self, filename):
         """导出详细数据到 Excel"""
         with pd.ExcelWriter(filename, engine='openpyxl') as writer:
+            # 确保至少有一个sheet - 创建汇总表
+            summary = self.generate_summary()
+            summary_df = pd.DataFrame([summary])
+            summary_df.to_excel(writer, sheet_name='Summary', index=False)
+            
+            # 其他详细数据（如果有）
             if self.buffer_overflows:
                 pd.DataFrame(self.buffer_overflows).to_excel(writer, sheet_name='Buffer_Overflows', index=False)
             if self.truck_wait_times:
@@ -825,8 +768,15 @@ class DCSimulation:
         # KPI 收集器
         self.kpi = KPICollector()
         
-        # 订单队列（FG Outbound）
+        # ===== 新逻辑：加载预生成订单 =====
+        self.orders = self._load_orders()
+        
+        # 订单队列（FG Outbound） - 保留兼容性
         self.pending_orders = []
+        
+        # Opening hour coefficient（可手动调节）
+        self.opening_hour_coefficient = scenario_config.get('opening_hour_coefficient', 
+                                                             SYSTEM_PARAMETERS.get('opening_hour_coefficient', 1.0))
         
         # 如果启用到达平滑化，计算优化后的到达率（仅针对Outbound）
         if self.config.get('arrival_smoothing', False):
@@ -838,6 +788,12 @@ class DCSimulation:
         print(f"初始化仿真: {scenario_config['name']}")
         print(f"  运营时间: {scenario_config['dc_open_time']:02d}:00 - {scenario_config['dc_close_time']:02d}:00")
         print(f"  运营小时数: {scenario_config['operating_hours']} 小时/天")
+        print(f"  Opening Hour Coefficient: {self.opening_hour_coefficient}")
+        
+        # 打印订单加载情况
+        if self.orders:
+            total_orders = sum(len(orders) for orders in self.orders.values())
+            print(f"  已加载订单: {total_orders} 个")
         
         # 打印FTE配置信息
         print(f"  FTE调整比例: {self.fte_manager.operating_ratio:.1%}")
@@ -852,6 +808,64 @@ class DCSimulation:
         
         if self.config.get('arrival_smoothing', False):
             print(f"  到达优化: 已启用（平滑高峰流量）")
+    
+    def _load_orders(self):
+        """加载预生成的订单数据"""
+        orders_path = SYSTEM_PARAMETERS.get('generated_orders_path')
+        
+        if not orders_path:
+            print("警告: 未找到订单数据路径，将使用旧的动态生成逻辑")
+            return None
+        
+        try:
+            import json
+            from pathlib import Path
+            
+            # 处理相对路径
+            if not Path(orders_path).is_absolute():
+                orders_path = Path(__file__).parent.parent / orders_path
+            else:
+                orders_path = Path(orders_path)
+            
+            if not orders_path.exists():
+                print(f"警告: 订单文件不存在: {orders_path}")
+                return None
+            
+            with open(orders_path, 'r', encoding='utf-8') as f:
+                orders_data = json.load(f)
+            
+            # 转换为Order对象，按category+direction分组
+            orders_dict = {}
+            for key, order_list in orders_data.items():
+                orders_dict[key] = [Order(order_data) for order_data in order_list]
+                
+                # 计算绝对仿真时间
+                for order in orders_dict[key]:
+                    # 假设仿真从第1天0点开始
+                    base_time = (order.day - 1) * 24
+                    
+                    # Outbound: 计算creation_time
+                    if order.direction == 'Outbound':
+                        # creation_hour可能是负数（表示前一天）
+                        if order.creation_hour < 0:
+                            # 例如：day=2, creation_hour=-24 → 第1天0点
+                            order.creation_time = base_time + order.creation_hour
+                        else:
+                            # 例如：day=2, creation_hour=10 → 第2天10点
+                            order.creation_time = base_time + order.creation_hour
+                    
+                    # 计算timeslot_time
+                    if order.timeslot_hour is not None:
+                        order.timeslot_time = base_time + order.timeslot_hour
+            
+            print(f"✓ 订单数据加载成功: {len(orders_dict)} 个月度分组")
+            return orders_dict
+            
+        except Exception as e:
+            print(f"错误: 加载订单数据失败 - {e}")
+            import traceback
+            traceback.print_exc()
+            return None
     
     def _init_resources(self):
         """初始化仿真资源（Timeslot预约系统）"""
@@ -879,19 +893,6 @@ class DCSimulation:
         
         # 启动timeslot容量更新和重置进程
         self.env.process(self.timeslot_capacity_manager())
-        
-        # 缓冲区
-        buffer_config = SYSTEM_PARAMETERS['buffer_capacity']
-        self.buffer_rp = TrailerBuffer(
-            self.env, 'R&P', 
-            buffer_config['rp_trailers'], 
-            buffer_config['pallets_per_trailer']
-        )
-        self.buffer_fg = TrailerBuffer(
-            self.env, 'FG', 
-            buffer_config['fg_trailers'], 
-            buffer_config['pallets_per_trailer']
-        )
         
         # 人力资源管理器（传入operating_hours以调整FTE）
         operating_hours = self.config['operating_hours']
@@ -1031,400 +1032,353 @@ class DCSimulation:
         hour = int(time) % 24
         return self.config['dc_open_time'] <= hour < self.config['dc_close_time']
     
-    def run(self, duration_days=30):
-        """运行仿真"""
-        print(f"\n开始仿真运行，持续 {duration_days} 天...")
+    # ==================== 新逻辑：订单驱动流程 ====================
+    
+    def outbound_order_scheduler(self, target_month=1):
+        """Outbound订单调度器（新逻辑）
         
-        # 启动各个进程
-        self.env.process(self.timeslot_capacity_manager())  # 启动timeslot容量管理器（包含KPI记录）
-        self.env.process(self.inbound_truck_arrival_process())  # Inbound卡车到达
-        self.env.process(self.buffer_release_process())
-        self.env.process(self.outbound_truck_arrival_process())  # Outbound卡车到达
-        self.env.process(self.buffer_monitor())
-        self.env.process(self.midnight_backlog_monitor())  # 启动午夜积压监控
+        Args:
+            target_month: 仿真的目标月份
+        """
+        if not self.orders:
+            print("警告: 无订单数据，跳过Outbound订单调度")
+            return
+        
+        # 收集该月的所有Outbound订单
+        outbound_orders = []
+        for key, orders_list in self.orders.items():
+            if f'M{target_month:02d}' in key and 'Outbound' in key:
+                outbound_orders.extend(orders_list)
+        
+        if not outbound_orders:
+            print(f"警告: 月份{target_month}无Outbound订单")
+            return
+        
+        print(f"调度{len(outbound_orders)}个Outbound订单")
+        
+        # 按creation_time排序
+        outbound_orders.sort(key=lambda o: o.creation_time)
+        
+        for order in outbound_orders:
+            # 等待到creation_time启动备货
+            if order.creation_time > self.env.now:
+                yield self.env.timeout(order.creation_time - self.env.now)
+            
+            # 启动备货流程
+            self.env.process(self.outbound_preparation_process(order))
+            
+            # 调度装货流程（在timeslot时刻）
+            self.env.process(self.outbound_loading_process(order))
+    
+    def outbound_preparation_process(self, order):
+        """Outbound备货流程（从creation_time开始）"""
+        order.preparation_started = True
+        order.processing_start_time = self.env.now
+        
+        # 获取每小时FTE处理能力
+        hourly_capacity = self.fte_manager.get_hourly_capacity(
+            order.category, 
+            'Outbound',
+            coefficient=self.opening_hour_coefficient
+        )
+        
+        total_pallets = order.pallets
+        processed_pallets = 0
+        
+        # 逐小时处理直到完成或到达timeslot
+        while processed_pallets < total_pallets:
+            # 检查是否已到timeslot时刻
+            if order.timeslot_time and self.env.now >= order.timeslot_time:
+                break
+            
+            # 本小时能处理的数量（取剩余和容量的最小值）
+            pallets_this_hour = min(hourly_capacity, total_pallets - processed_pallets)
+            
+            # 计算需要的时间（小时）
+            time_needed = pallets_this_hour / hourly_capacity if hourly_capacity > 0 else 1
+            
+            # 等待处理完成（但不超过timeslot时刻）
+            if order.timeslot_time:
+                time_until_slot = max(0, order.timeslot_time - self.env.now)
+                actual_time = min(time_needed, time_until_slot)
+            else:
+                actual_time = time_needed
+            
+            if actual_time > 0:
+                yield self.env.timeout(actual_time)
+                processed_pallets += pallets_this_hour
+                order.preparation_pallets_done = processed_pallets
+        
+        # 检查是否完成
+        if processed_pallets >= total_pallets:
+            order.preparation_completed = True
+            order.processing_end_time = self.env.now
+    
+    def outbound_loading_process(self, order):
+        """Outbound装货流程（在timeslot时刻）"""
+        # 等待到timeslot时刻
+        if order.timeslot_time and order.timeslot_time > self.env.now:
+            yield self.env.timeout(order.timeslot_time - self.env.now)
+        
+        # 检查备货是否完成
+        if not order.preparation_completed:
+            # 备货未完成，需要延误重排（不打印以减少噪音）
+            order.on_time = False
+            
+            # 继续等待备货完成
+            while not order.preparation_completed:
+                yield self.env.timeout(0.1)  # 每6分钟检查一次
+            
+            # 重新分配timeslot
+            new_slot = self.reschedule_delayed_order(order)
+            
+            if new_slot:
+                if order.timeslot_time:
+                    order.delay_hours = new_slot - order.timeslot_time
+                else:
+                    order.delay_hours = new_slot - self.env.now
+                order.actual_timeslot = new_slot
+                
+                # 等待到新timeslot
+                if new_slot > self.env.now:
+                    yield self.env.timeout(new_slot - self.env.now)
+            else:
+                print(f"错误: 无法为订单{order.order_id}重新分配timeslot")
+                return
+        else:
+            order.actual_timeslot = order.timeslot_time
+        
+        # 检查timeslot容量
+        slot_key = f'{order.category.lower()}_loading' if order.category == 'FG' else 'rp_loading'
+        
+        # 等待可用slot（如果当前小时已满）
+        while True:
+            available = self.hourly_timeslot_capacity.get(slot_key, 0)
+            used = self.hourly_timeslot_used.get(slot_key, 0)
+            
+            if used < available:
+                break
+            
+            # 等待下一个小时
+            yield self.env.timeout(1)
+        
+        # 占用timeslot
+        self.hourly_timeslot_used[slot_key] = self.hourly_timeslot_used.get(slot_key, 0) + 1
+        
+        # 装货（1小时）
+        loading_start = self.env.now
+        yield self.env.timeout(1)
+        
+        order.completed = True
+        
+        # 记录KPI
+        self.kpi.record_outbound_truck({
+            'category': order.category,
+            'pallets': order.pallets,
+            'region': order.region,
+            'on_time': order.on_time,
+            'delay_hours': order.delay_hours,
+            'service_time': loading_start,
+            'completion_time': self.env.now
+        })
+    
+    def inbound_order_scheduler(self, target_month=1):
+        """Inbound订单调度器（新逻辑）
+        
+        Args:
+            target_month: 仿真的目标月份
+        """
+        if not self.orders:
+            print("警告: 无订单数据，跳过Inbound订单调度")
+            return
+        
+        # 收集该月的所有Inbound订单
+        inbound_orders = []
+        for key, orders_list in self.orders.items():
+            if f'M{target_month:02d}' in key and 'Inbound' in key:
+                inbound_orders.extend(orders_list)
+        
+        if not inbound_orders:
+            print(f"警告: 月份{target_month}无Inbound订单")
+            return
+        
+        print(f"调度{len(inbound_orders)}个Inbound订单")
+        
+        # 按timeslot_time排序
+        inbound_orders.sort(key=lambda o: o.timeslot_time)
+        
+        for order in inbound_orders:
+            # 等待到timeslot时刻
+            if order.timeslot_time and order.timeslot_time > self.env.now:
+                yield self.env.timeout(order.timeslot_time - self.env.now)
+            
+            # 启动接收流程
+            self.env.process(self.inbound_receiving_process(order))
+    
+    def inbound_receiving_process(self, order):
+        """Inbound接收流程（在timeslot时刻）"""
+        # 检查timeslot容量
+        slot_key = f'{order.category.lower()}_reception' if order.category == 'FG' else 'rp_reception'
+        
+        # 等待可用slot
+        while True:
+            available = self.hourly_timeslot_capacity.get(slot_key, 0)
+            used = self.hourly_timeslot_used.get(slot_key, 0)
+            
+            if used < available:
+                break
+            
+            yield self.env.timeout(1)
+        
+        # 占用timeslot
+        self.hourly_timeslot_used[slot_key] = self.hourly_timeslot_used.get(slot_key, 0) + 1
+        
+        # 卸货（1小时）
+        unloading_start = self.env.now
+        yield self.env.timeout(1)
+        
+        # 记录24小时处理deadline
+        order.processing_deadline = self.env.now + 24
+        order.processing_start_time = self.env.now
+        
+        # FTE处理（24小时内完成）
+        hourly_capacity = self.fte_manager.get_hourly_capacity(
+            order.category,
+            'Inbound',
+            coefficient=self.opening_hour_coefficient
+        )
+        
+        total_pallets = order.pallets
+        processed_pallets = 0
+        
+        while processed_pallets < total_pallets:
+            # 检查是否超过deadline
+            if self.env.now >= order.processing_deadline:
+                print(f"警告: 订单{order.order_id}超过24h处理deadline")
+                break
+            
+            # 本小时能处理的数量
+            pallets_this_hour = min(hourly_capacity, total_pallets - processed_pallets)
+            time_needed = pallets_this_hour / hourly_capacity if hourly_capacity > 0 else 1
+            
+            yield self.env.timeout(time_needed)
+            processed_pallets += pallets_this_hour
+        
+        order.processing_end_time = self.env.now
+        order.completed = True
+        
+        # 记录KPI
+        self.kpi.record_inbound_truck({
+            'category': order.category,
+            'pallets': order.pallets,
+            'arrival_time': unloading_start,
+            'processing_time': self.env.now - order.processing_start_time,
+            'missed_deadline': self.env.now > order.processing_deadline
+        })
+    
+    def reschedule_delayed_order(self, order):
+        """为延误订单重新分配timeslot"""
+        slot_key = f'{order.category.lower()}_loading' if order.category == 'FG' else 'rp_loading'
+        hourly_config = SYSTEM_PARAMETERS['hourly_dock_capacity']
+        
+        # 从当前时刻开始查找可用slot
+        search_start = int(self.env.now)
+        
+        for abs_hour in range(search_start, search_start + 100):  # 最多搜索100小时
+            hour_of_day = abs_hour % 24
+            
+            # 获取该小时的容量
+            if order.category == 'FG':
+                max_capacity = hourly_config['FG']['loading'].get(hour_of_day, 
+                    hourly_config['FG']['loading'].get(str(hour_of_day), 0))
+            else:
+                max_capacity = hourly_config['R&P']['loading'].get(hour_of_day,
+                    hourly_config['R&P']['loading'].get(str(hour_of_day), 0))
+            
+            if max_capacity > 0:
+                # 找到可用slot
+                return abs_hour
+        
+        # 未找到可用slot
+        return None
+    
+    # ==================== 结束新逻辑 ====================
+    
+    def run(self, duration_days=30, target_month=1):
+        """运行仿真
+        
+        Args:
+            duration_days: 仿真持续天数
+            target_month: 目标月份（1-12），用于选择订单数据
+        """
+        print(f"\n开始仿真运行，持续 {duration_days} 天，目标月份: {target_month}...")
+        
+        # 启动timeslot容量管理器（必需）
+        self.env.process(self.timeslot_capacity_manager())
+        
+        # 订单驱动流程
+        if not self.orders:
+            raise ValueError("未找到订单数据！请先运行data_preparation.py生成订单。")
+        
+        print("使用订单驱动流程")
+        # 启动订单调度器
+        self.env.process(self.inbound_order_scheduler(target_month))
+        self.env.process(self.outbound_order_scheduler(target_month))
         
         # 运行仿真
         self.env.run(until=duration_days * 24)
+        
+        # 统计延误订单
+        if self.orders:
+            delayed_count = sum(1 for orders_list in self.orders.values() 
+                              for order in orders_list 
+                              if order.direction == 'Outbound' and not order.on_time and order.completed)
+            if delayed_count > 0:
+                print(f"\n共有 {delayed_count} 个Outbound订单因备货延误而重排timeslot")
         
         print(f"仿真运行完成！")
         
         # 生成汇总报告
         summary = self.kpi.generate_summary()
+        
+        # 添加订单统计（新逻辑）
+        if self.orders:
+            summary['order_statistics'] = self._generate_order_statistics()
+        
         return summary
     
-    def inbound_truck_arrival_process(self):
-        """
-        Inbound卡车到达进程（基于真实数据的hourly到达率）
-        从Total Shipments 2025的Inbound sheet提取
-        """
-        arrival_rates = SYSTEM_PARAMETERS.get('truck_arrival_rates_inbound', {})
+    def _generate_order_statistics(self):
+        """生成订单统计信息（新逻辑）"""
+        stats = {
+            'total_orders': 0,
+            'completed_orders': 0,
+            'on_time_orders': 0,
+            'delayed_orders': 0,
+            'total_delay_hours': 0,
+            'on_time_rate': 0.0,
+            'avg_delay_hours': 0.0
+        }
         
-        if not arrival_rates:
-            print("警告：没有Inbound卡车到达率数据，跳过Inbound流程")
-            return
+        if not self.orders:
+            return stats
         
-        while True:
-            hour = int(self.env.now) % 24
-            
-            # 遍历每个类别
-            for category in ['FG', 'R&P']:
-                if category in arrival_rates:
-                    hourly_rates = arrival_rates[category]
-                    
-                    # 获取当前小时的到达率（支持string和int key）
-                    lambda_hour = hourly_rates.get(hour, hourly_rates.get(str(hour), 0))
-                    
-                    if lambda_hour > 0:
-                        # 泊松分布生成到达卡车数
-                        num_arrivals = np.random.poisson(lambda_hour)
-                        
-                        for i in range(num_arrivals):
-                            # 生成Inbound卡车
-                            truck = self._generate_inbound_truck(category)
-                            
-                            # 添加到达延迟（指数分布，平均 15 分钟）
-                            delay = np.random.exponential(scale=0.25)
-                            yield self.env.timeout(delay)
-                            
-                            truck.actual_arrival_time = self.env.now
-                            
-                            # 启动入库处理
-                            self.env.process(self.inbound_truck_process(truck))
-            
-            yield self.env.timeout(1)  # 每小时检查一次
-    
-    def _generate_inbound_truck(self, category):
-        """生成Inbound卡车（用于入库流程）"""
-        # 从托盘分布中采样
-        pallet_config = SYSTEM_PARAMETERS['pallets_distribution'][category]
+        all_orders = []
+        for orders_list in self.orders.values():
+            all_orders.extend(orders_list)
         
-        if pallet_config['type'] == 'triangular':
-            pallets = int(np.random.triangular(
-                pallet_config['min'],
-                pallet_config['mode'],
-                pallet_config['max']
-            ))
-        else:  # lognormal
-            pallets = int(np.random.lognormal(
-                pallet_config['mean'],
-                pallet_config['std']
-            ))
+        stats['total_orders'] = len(all_orders)
+        stats['completed_orders'] = sum(1 for o in all_orders if o.completed)
+        stats['on_time_orders'] = sum(1 for o in all_orders if o.completed and o.on_time)
+        stats['delayed_orders'] = sum(1 for o in all_orders if o.completed and not o.on_time)
+        stats['total_delay_hours'] = sum(o.delay_hours for o in all_orders if o.completed)
         
-        # 创建Inbound卡车
-        truck = Truck(category, 'Inbound', pallets, self.env.now, region=None)
-        truck.departure_deadline = None  # Inbound没有departure deadline
+        if stats['completed_orders'] > 0:
+            stats['on_time_rate'] = stats['on_time_orders'] / stats['completed_orders'] * 100
         
-        return truck
-    
-    def inbound_truck_process(self, truck):
-        """处理 Inbound 卡车（Timeslot 预约制）"""
-        category = truck.category
-        pallets = truck.pallets
-        arrival_time = self.env.now
-        processing_deadline = arrival_time + 24
+        if stats['delayed_orders'] > 0:
+            stats['avg_delay_hours'] = stats['total_delay_hours'] / stats['delayed_orders']
         
-        slot_key = f'{category.lower()}_reception' if category == 'FG' else 'rp_reception'
-        
-        # 等待并预约 timeslot
-        while True:
-            current_hour = int(self.env.now) % 24
-            available_slots = self.hourly_timeslot_capacity[slot_key]
-            used_slots = self.hourly_timeslot_used[slot_key]
-            
-            if available_slots > 0 and used_slots < available_slots:
-                self.hourly_timeslot_used[slot_key] += 1
-                break
-            else:
-                yield self.env.timeout(0.25)
-        
-        truck.service_start_time = self.env.now
-        self.kpi.record_truck_wait(truck, self.config)
-        
-        # 卸货操作
-        unloading_time = self._calculate_unloading_time(category, pallets)
-        yield self.env.timeout(unloading_time)
-        unload_end_time = self.env.now
-        
-        self.kpi.record_inbound_operation(
-            category=category,
-            pallets=pallets,
-            start_time=truck.service_start_time,
-            end_time=unload_end_time,
-            from_buffer=False
-        )
-        
-        # 处理完成（24h deadline）
-        hourly_capacity = self.fte_manager.get_hourly_capacity(category, 'Inbound')
-        processing_time = pallets / hourly_capacity
-        
-        processing_start = self.env.now
-        yield self.env.timeout(processing_time)
-        processing_end = self.env.now
-        
-        if processing_end > processing_deadline:
-            delay_hours = processing_end - processing_deadline
-            self.kpi.record_inbound_delay(category, pallets, arrival_time, processing_end, delay_hours)
-    
-    def _calculate_unloading_time(self, category, pallets):
-        """计算卸货时间"""
-        efficiency_params = SYSTEM_PARAMETERS['efficiency']
-        
-        if category == 'R&P':
-            efficiency = np.random.normal(
-                efficiency_params['rp_mean'],
-                efficiency_params['rp_std']
-            )
-        else:  # FG
-            efficiency = np.random.normal(
-                efficiency_params['fg_mean'],
-                efficiency_params['fg_std']
-            )
-        
-        # 确保效率为正
-        efficiency = max(efficiency, 0.5)
-        
-        # 卸货时间 = 托盘数 / 效率（小时）
-        unloading_time = pallets / efficiency
-        return unloading_time
-    
-    def buffer_release_process(self):
-        """缓冲区释放进程（DC 开门时优先处理）"""
-        while True:
-            if self.is_dc_open():
-                # 释放 R&P 缓冲
-                if self.buffer_rp.current_pallets > 0:
-                    release_amount = min(100, self.buffer_rp.current_pallets)
-                    pallets = self.buffer_rp.release(release_amount)
-                    if pallets > 0:
-                        # 创建虚拟truck对象处理从缓冲区来的货物
-                        truck = Truck(category='R&P', direction='Inbound', pallets=pallets, 
-                                    scheduled_time=self.env.now, region=None)
-                        self.env.process(self.inbound_truck_process(truck))
-                
-                # 释放 FG 缓冲
-                if self.buffer_fg.current_pallets > 0:
-                    release_amount = min(150, self.buffer_fg.current_pallets)
-                    pallets = self.buffer_fg.release(release_amount)
-                    if pallets > 0:
-                        # 创建虚拟truck对象处理从缓冲区来的货物
-                        truck = Truck(category='FG', direction='Inbound', pallets=pallets, 
-                                    scheduled_time=self.env.now, region=None)
-                        self.env.process(self.inbound_truck_process(truck))
-            
-            yield self.env.timeout(0.5)  # 每 30 分钟检查一次
-    
-    def outbound_truck_arrival_process(self):
-        """
-        Outbound卡车到达进程（基于统计到达率）
-        
-        来源：Total Shipments 2025.xlsx - Outbound Shipments
-        统计方法：分类别统计每小时实际到达卡车数的平均值
-        全年实际数据（305天）：FG占69.3%（36.77辆/天），R&P占30.7%（16.27辆/天）
-        """
-        # 使用优化后的到达率（如果启用）
-        arrival_rates = self.arrival_rates
-        
-        while True:
-            hour = int(self.env.now) % 24
-            
-            if self.is_dc_open():
-                # 分别生成FG和R&P的到达卡车（使用各自的到达率）
-                for category in ['FG', 'R&P']:
-                    # 支持字符串和整数键
-                    hourly_rates = arrival_rates[category]
-                    lambda_hour = hourly_rates.get(hour, hourly_rates.get(str(hour), 0))
-                    
-                    if lambda_hour > 0:
-                        # 基于实际数据验证：FG Var/Mean=0.48, R&P Var/Mean=0.30
-                        # 到达比泊松分布更规律，使用75%预约+25%临时模型
-                        scheduled_ratio = 0.75  # 75%为预约到达
-                        
-                        # 预约到达（近似确定性）
-                        num_scheduled = int(lambda_hour * scheduled_ratio + 0.5)  # 四舍五入
-                        
-                        # 临时到达（泊松分布）
-                        num_random = np.random.poisson(lambda_hour * (1 - scheduled_ratio))
-                        
-                        num_arrivals = num_scheduled + num_random
-                        
-                        for i in range(num_arrivals):
-                            # 生成指定类别的卡车（Outbound）
-                            truck = self._generate_truck(category)
-                            
-                            # 添加到达延迟（指数分布，平均 15 分钟）
-                            # 避免同一小时内所有卡车同时到达
-                            delay = np.random.exponential(scale=0.25)
-                            yield self.env.timeout(delay)
-                            
-                            truck.actual_arrival_time = self.env.now
-                            
-                            # 启动出库处理
-                            self.env.process(self.outbound_process(truck))
-            
-            yield self.env.timeout(1)  # 每小时检查一次
-    
-    def outbound_process(self, truck):
-        """
-        出库处理进程（两阶段：先处理货物，后占用timeslot装车）
-        
-        阶段1: 处理货物（Before ready to load）
-        阶段2: 占用timeslot装车
-        """
-        # ========== 阶段1: 处理货物 ==========
-        # 使用FTE处理能力
-        hourly_capacity = self.fte_manager.get_hourly_capacity(truck.category, 'Outbound')
-        processing_time = truck.pallets / hourly_capacity
-        
-        truck.processing_start_time = self.env.now
-        yield self.env.timeout(processing_time)
-        truck.processing_end_time = self.env.now
-        
-        # ========== 阶段2: 等待并预约timeslot装车 ==========
-        # 确定使用哪个timeslot类型
-        slot_key = 'rp_loading' if truck.category == 'R&P' else 'fg_loading'
-        
-        # 等待直到本小时有可用的timeslot
-        while True:
-            current_hour = int(self.env.now) % 24
-            available_slots = self.hourly_timeslot_capacity[slot_key]
-            used_slots = self.hourly_timeslot_used[slot_key]
-            
-            if available_slots > 0 and used_slots < available_slots:
-                # 有可用slot，占用1个
-                self.hourly_timeslot_used[slot_key] += 1
-                break
-            else:
-                # 没有可用slot或DC关闭，等待15分钟后重新检查
-                yield self.env.timeout(0.25)
-        
-        # 记录获得timeslot的时间
-        truck.service_start_time = self.env.now
-        
-        # 记录等待时间（传入DC配置以排除关闭时间）
-        self.kpi.record_truck_wait(truck, self.config)
-        
-        # ========== 阶段3: 装车操作 ==========
-        # 装车时间（假设固定30分钟）
-        loading_time = 0.5  # 30分钟
-        yield self.env.timeout(loading_time)
-        
-        truck.service_end_time = self.env.now
-        
-        # ========== 检查是否错过发运时间（仅FG） ==========
-        if truck.category == 'FG' and truck.departure_deadline:
-            if truck.service_end_time > truck.departure_deadline:
-                # 标记延期
-                truck.is_delayed = True
-                truck.delay_hours = truck.service_end_time - truck.departure_deadline
-                
-                # 记录SLA miss
-                dummy_order = Order(truck.pallets, truck.scheduled_time, truck.departure_deadline, 
-                                   has_time_constraint=truck.has_time_constraint, region=truck.region)
-                dummy_order.completion_time = truck.service_end_time
-                self.kpi.record_sla_miss(dummy_order, truck.service_end_time)
-        
-        # 记录订单完成（用于SLA统计）
-        if truck.departure_deadline:
-            dummy_order = Order(truck.pallets, truck.scheduled_time, truck.departure_deadline,
-                               has_time_constraint=truck.has_time_constraint, region=truck.region)
-            dummy_order.completion_time = truck.service_end_time
-            self.kpi.record_order_completion(dummy_order)
-        
-        # 记录完成
-        self.kpi.record_outbound_operation(truck)
-    
-    def buffer_monitor(self):
-        """缓冲区监控器"""
-        while True:
-            hour = int(self.env.now) % 24
-            
-            # 记录缓冲区占用率
-            self.kpi.record_buffer_occupancy(hour, 'R&P', self.buffer_rp.get_occupancy_rate())
-            self.kpi.record_buffer_occupancy(hour, 'FG', self.buffer_fg.get_occupancy_rate())
-            
-            yield self.env.timeout(1)  # 每小时记录
-    
-    def midnight_backlog_monitor(self):
-        """午夜积压监控器 - 每天24:00记录待处理订单"""
-        while True:
-            # 等到下一个午夜（24小时）
-            current_hour = self.env.now % 24
-            time_to_midnight = 24 - current_hour if current_hour > 0 else 24
-            yield self.env.timeout(time_to_midnight)
-            
-            # 记录缓冲区积压（作为待处理托盘数）
-            day = int(self.env.now / 24)
-            pending_pallets = self.buffer_rp.current_pallets + self.buffer_fg.current_pallets
-            pending_orders = 0  # 暂时使用0，实际应该统计等待队列中的卡车数
-            
-            self.kpi.record_midnight_backlog(day, pending_orders, pending_pallets)
-    
-    def _generate_truck(self, category):
-        """
-        生成指定类别的随机到达卡车（按规则分配region和departure_time）
-        
-        Args:
-            category: 'FG' 或 'R&P'
-        
-        Returns:
-            Truck: 新生成的卡车实体
-            
-        生成规则:
-            - 类别: 由调用者指定（基于实际到达率）
-            - 托盘数: 基于实际数据的三角分布（FG: 1-33-276, R&P: 1-22-560）
-            - 方向: Outbound（出库装车）
-            - Region (仅FG): G2 (80%) / ROW (20%)
-            - Departure time: 根据region计算
-        """
-        pallets_dist = SYSTEM_PARAMETERS['pallets_distribution'][category]
-        
-        # 使用三角分布生成托盘数（更符合实际数据）
-        pallets = int(np.random.triangular(
-            pallets_dist['min'], 
-            pallets_dist['mode'],
-            pallets_dist['max']
-        ))
-        
-        # 确保至少1个托盘
-        pallets = max(1, pallets)
-        
-        # ======== FG Outbound: 按规则分配region和departure_time ========
-        if category == 'FG':
-            # 按8:2比例分配region
-            region = 'G2' if np.random.random() < 0.8 else 'ROW'
-            
-            # 创建卡车实体（带region）
-            truck = Truck(category, 'Outbound', pallets, self.env.now, region=region)
-            
-            # 根据region计算departure_time
-            current_hour = int(self.env.now) % 24
-            current_day = int(self.env.now / 24)
-            
-            if region == 'G2':
-                # G2: 50%当天，50%次日
-                if np.random.random() < 0.5:
-                    # 当天发运：假设18:00前送走
-                    hours_until_18 = (18 - current_hour) if current_hour < 18 else 0
-                    truck.departure_deadline = self.env.now + hours_until_18
-                    truck.has_time_constraint = True  # G2有时间约束
-                else:
-                    # 次日上午发运：第二天10:00
-                    hours_until_tomorrow_10 = (24 - current_hour) + 10
-                    truck.departure_deadline = self.env.now + hours_until_tomorrow_10
-                    truck.has_time_constraint = True  # G2有时间约束
-            else:  # ROW
-                # ROW: 100%次日上午10:00发运
-                hours_until_tomorrow_10 = (24 - current_hour) + 10
-                truck.departure_deadline = self.env.now + hours_until_tomorrow_10
-                truck.has_time_constraint = True  # ROW有时间约束
-        
-        else:  # R&P
-            # R&P无region和严格departure要求
-            truck = Truck(category, 'Outbound', pallets, self.env.now, region=None)
-            truck.departure_deadline = None
-            truck.has_time_constraint = False  # R&P无时间约束，不计入SLA
-        
-        return truck
+        return stats
 
 
 # ==================== 多场景对比运行 ====================
@@ -1478,8 +1432,7 @@ def run_scenario_comparison(scenarios_to_run=None, num_replications=5, duration_
             if result.get('total_inbound_delays', 0) > 0:
                 print(f"    - 平均延期: {result.get('avg_inbound_delay_hours', 0):.2f}h")
                 print(f"    - FG延期: {result.get('fg_inbound_delays', 0)}, R&P延期: {result.get('rp_inbound_delays', 0)}")
-            print(f"  Outbound SLA miss: {result['total_sla_misses']} 次")
-            print(f"  SLA 遵守率: {result['sla_compliance_rate']:.2%}")
+            print(f"  准时率: {result.get('order_statistics', {}).get('on_time_rate', 0):.1f}%")
             
             print(f"\n  === 资源利用 ===")
             print(f"  平均卡车等待时间: {result['avg_truck_wait_time']:.2f} 小时")
@@ -1502,20 +1455,25 @@ def run_scenario_comparison(scenarios_to_run=None, num_replications=5, duration_
         # 计算平均结果
         avg_result = {}
         for key in scenario_results[0].keys():
-            # 跳过字典类型的数据（如hourly_dock_utilization）
-            if key == 'hourly_dock_utilization':
-                # 直接使用第一次重复的hourly数据（因为是平均后的结果）
+            # 跳过字典类型的数据（如hourly_dock_utilization, order_statistics）
+            if key in ['hourly_dock_utilization', 'order_statistics']:
+                # 直接使用第一次重复的数据（因为是平均后的结果或不适合平均）
                 avg_result[key] = scenario_results[0][key]
                 continue
             
+            # 检查值是否为数值类型
             values = [r[key] for r in scenario_results]
-            avg_result[key] = np.mean(values)
-            avg_result[f'{key}_std'] = np.std(values)
+            if isinstance(values[0], (int, float, np.number)):
+                avg_result[key] = np.mean(values)
+                avg_result[f'{key}_std'] = np.std(values)
+            else:
+                # 非数值类型，使用第一个值
+                avg_result[key] = values[0]
         
         all_results[scenario_name] = avg_result
         
         print(f"\n{scenario_config['name']} - 平均结果 ({num_replications} 次重复):")
-        print(f"  SLA 遵守率: {avg_result['sla_compliance_rate']:.2%} ± {avg_result['sla_compliance_rate_std']:.2%}")
+        print(f"  准时率: {avg_result.get('order_statistics', {}).get('on_time_rate', 0):.1f}%")
         print(f"  平均卡车等待时间: {avg_result['avg_truck_wait_time']:.2f} ± {avg_result['avg_truck_wait_time_std']:.2f} 小时")
         print(f"  平均午夜积压: {avg_result['avg_midnight_backlog_pallets']:.1f} ± {avg_result['avg_midnight_backlog_pallets_std']:.1f} 托盘")
     
@@ -1548,14 +1506,14 @@ def visualize_results(comparison_df, all_results=None):
             if scenario in all_results and 'hourly_dock_utilization' in all_results[scenario]:
                 hourly_data_all[scenario] = all_results[scenario]['hourly_dock_utilization']
     
-    # 图 1: SLA 遵守率
+    # 图 1: 准时率
     fig, ax = plt.subplots(figsize=(10, 6))
-    compliance_rates = comparison_df['sla_compliance_rate'] * 100
-    errors = comparison_df['sla_compliance_rate_std'] * 100
-    bars = ax.bar(scenario_labels, compliance_rates, yerr=errors, capsize=5, 
+    # 从order_statistics中提取on_time_rate
+    on_time_rates = [all_results[s].get('order_statistics', {}).get('on_time_rate', 0) for s in scenarios]
+    bars = ax.bar(scenario_labels, on_time_rates, capsize=5, 
                    color=['#2ecc71', '#f39c12', '#e74c3c', '#c0392b'][:len(scenarios)])
-    ax.set_ylabel('SLA Compliance Rate (%)', fontsize=12)
-    ax.set_title('SLA Compliance Rate Comparison', fontsize=14, fontweight='bold', pad=20)
+    ax.set_ylabel('On Time Rate (%)', fontsize=12)
+    ax.set_title('On Time Rate Comparison', fontsize=14, fontweight='bold', pad=20)
     ax.set_ylim([0, 105])
     ax.grid(axis='y', alpha=0.3)
     
@@ -1565,28 +1523,28 @@ def visualize_results(comparison_df, all_results=None):
                 f'{height:.1f}%', ha='center', va='bottom', fontsize=10, fontweight='bold')
     
     plt.tight_layout()
-    path1 = os.path.join(FIGURES_DIR, '1_sla_compliance_rate.png')
+    path1 = os.path.join(FIGURES_DIR, '1_on_time_rate.png')
     plt.savefig(path1, dpi=300, bbox_inches='tight')
-    print(f"SLA compliance rate chart saved: {path1}")
+    print(f"On time rate chart saved: {path1}")
     plt.close()
     
-    # 图 1b: SLA 按地区分解
+    # 图 1b: 准时率按地区分解
     fig, ax = plt.subplots(figsize=(12, 7))
     x = np.arange(len(scenario_labels))
     width = 0.35
     
-    g2_rates = comparison_df['G2_sla_compliance_rate'] * 100
-    row_rates = comparison_df['ROW_sla_compliance_rate'] * 100
-    g2_stds = comparison_df['G2_sla_compliance_rate_std'] * 100
-    row_stds = comparison_df['ROW_sla_compliance_rate_std'] * 100
+    g2_rates = comparison_df['G2_on_time_rate'] * 100
+    row_rates = comparison_df['ROW_on_time_rate'] * 100
+    g2_stds = comparison_df.get('G2_on_time_rate_std', pd.Series([0]*len(scenarios))) * 100
+    row_stds = comparison_df.get('ROW_on_time_rate_std', pd.Series([0]*len(scenarios))) * 100
     
     bars1 = ax.bar(x - width/2, g2_rates, width, label='G2 Region', 
                    color='#3498db', yerr=g2_stds, capsize=5)
     bars2 = ax.bar(x + width/2, row_rates, width, label='ROW Region', 
                    color='#e74c3c', yerr=row_stds, capsize=5)
     
-    ax.set_ylabel('SLA Compliance Rate (%)', fontsize=12)
-    ax.set_title('SLA Compliance Rate by Region (G2 vs ROW)', fontsize=14, fontweight='bold', pad=20)
+    ax.set_ylabel('On Time Rate (%)', fontsize=12)
+    ax.set_title('On Time Rate by Region (G2 vs ROW)', fontsize=14, fontweight='bold', pad=20)
     ax.set_xticks(x)
     ax.set_xticklabels(scenario_labels, rotation=15, ha='right')
     ax.set_ylim([0, 105])
@@ -1611,49 +1569,7 @@ def visualize_results(comparison_df, all_results=None):
     print(f"SLA by region chart saved: {path1b}")
     plt.close()
     
-    # 图 2: 平均卡车等待时间
-    fig, ax = plt.subplots(figsize=(10, 6))
-    wait_times = comparison_df['avg_truck_wait_time']
-    errors = comparison_df['avg_truck_wait_time_std']
-    bars = ax.bar(scenario_labels, wait_times, yerr=errors, capsize=5,
-                   color=['#1abc9c', '#16a085', '#27ae60', '#2980b9'][:len(scenarios)])
-    ax.set_ylabel('Wait Time (Hours)', fontsize=12)
-    ax.set_title('Average Truck Wait Time Comparison', fontsize=14, fontweight='bold', pad=20)
-    ax.grid(axis='y', alpha=0.3)
-    
-    for bar in bars:
-        height = bar.get_height()
-        ax.text(bar.get_x() + bar.get_width()/2., height,
-                f'{height:.2f}h', ha='center', va='bottom', fontsize=10, fontweight='bold')
-    
-    plt.tight_layout()
-    path2 = os.path.join(FIGURES_DIR, '2_avg_truck_wait_time.png')
-    plt.savefig(path2, dpi=300, bbox_inches='tight')
-    print(f"Wait time chart saved: {path2}")
-    plt.close()
-    
-    # 图 3: 午夜积压
-    fig, ax = plt.subplots(figsize=(10, 6))
-    backlogs = comparison_df['avg_midnight_backlog_pallets']
-    errors = comparison_df['avg_midnight_backlog_pallets_std']
-    bars = ax.bar(scenario_labels, backlogs, yerr=errors, capsize=5,
-                   color=['#95a5a6', '#7f8c8d', '#34495e', '#2c3e50'][:len(scenarios)])
-    ax.set_ylabel('Number of Pallets', fontsize=12)
-    ax.set_title('Average Midnight Backlog Comparison', fontsize=14, fontweight='bold', pad=20)
-    ax.grid(axis='y', alpha=0.3)
-    
-    for bar in bars:
-        height = bar.get_height()
-        ax.text(bar.get_x() + bar.get_width()/2., height,
-                f'{height:.0f}', ha='center', va='bottom', fontsize=10, fontweight='bold')
-    
-    plt.tight_layout()
-    path3 = os.path.join(FIGURES_DIR, '3_midnight_backlog.png')
-    plt.savefig(path3, dpi=300, bbox_inches='tight')
-    print(f"Midnight backlog chart saved: {path3}")
-    plt.close()
-    
-    # Figure 4: Flow Statistics (Stacked Bars)
+    # Figure 2: Flow Statistics (Stacked Bars)
     fig, ax = plt.subplots(figsize=(12, 7))
     
     fg_inbound = comparison_df['FG_inbound_pallets']
@@ -1695,12 +1611,12 @@ def visualize_results(comparison_df, all_results=None):
                     ha='center', va='center', fontsize=8, color='white', fontweight='bold')
     
     plt.tight_layout()
-    path4 = os.path.join(FIGURES_DIR, '4_flow_statistics.png')
+    path4 = os.path.join(FIGURES_DIR, '2_flow_statistics.png')
     plt.savefig(path4, dpi=300, bbox_inches='tight')
     print(f"Flow statistics chart saved: {path4}")
     plt.close()
     
-    # Figure 4b: FG Outbound by Region (Pallets)
+    # Figure 2b: FG Outbound by Region (Pallets)
     fig, ax = plt.subplots(figsize=(12, 7))
     
     fg_g2_outbound = comparison_df['FG_G2_outbound_pallets']
@@ -1732,12 +1648,12 @@ def visualize_results(comparison_df, all_results=None):
                    f'{height/1000:.1f}k', ha='center', va='bottom', fontsize=10, fontweight='bold')
     
     plt.tight_layout()
-    path4b = os.path.join(FIGURES_DIR, '4b_fg_outbound_by_region.png')
+    path4b = os.path.join(FIGURES_DIR, '2b_fg_outbound_by_region.png')
     plt.savefig(path4b, dpi=300, bbox_inches='tight')
     print(f"FG outbound flow by region chart saved: {path4b}")
     plt.close()
     
-    # Figure 4c: Orders vs Pallets Flow Comparison
+    # Figure 2c: Orders vs Pallets Flow Comparison
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 7))
     
     fg_inbound_pallets = comparison_df['FG_inbound_pallets']
@@ -1806,12 +1722,12 @@ def visualize_results(comparison_df, all_results=None):
             ax2.text(i + width/2, rp_in + rp_out/2, f'{rp_out:.0f}', ha='center', va='center', fontsize=8, color='white', fontweight='bold')
     
     plt.tight_layout()
-    path4c = os.path.join(FIGURES_DIR, '4c_flow_statistics_orders.png')
+    path4c = os.path.join(FIGURES_DIR, '2c_flow_statistics_orders.png')
     plt.savefig(path4c, dpi=300, bbox_inches='tight')
     print(f"Orders flow statistics chart saved: {path4c}")
     plt.close()
     
-    # Figure 4d: FG Outbound by Region (Orders)
+    # Figure 2d: FG Outbound by Region (Orders)
     fig, ax = plt.subplots(figsize=(12, 7))
     
     fg_g2_orders = comparison_df['FG_G2_outbound_orders']
@@ -1843,12 +1759,12 @@ def visualize_results(comparison_df, all_results=None):
                    f'{height:.0f}', ha='center', va='bottom', fontsize=10, fontweight='bold')
     
     plt.tight_layout()
-    path4d = os.path.join(FIGURES_DIR, '4d_fg_outbound_orders_by_region.png')
+    path4d = os.path.join(FIGURES_DIR, '2d_fg_outbound_orders_by_region.png')
     plt.savefig(path4d, dpi=300, bbox_inches='tight')
     print(f"FG outbound orders by region chart saved: {path4d}")
     plt.close()
     
-    # Figure 5: Timeslot Dock Utilization Rate (by Direction)
+    # Figure 3: Timeslot Dock Utilization Rate (by Direction)
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
     
     fg_inbound_util = comparison_df['FG_inbound_utilization'] * 100
@@ -1896,12 +1812,12 @@ def visualize_results(comparison_df, all_results=None):
     
     fig.suptitle('Timeslot Dock Utilization Comparison (by Direction)', fontsize=15, fontweight='bold', y=0.98)
     plt.tight_layout()
-    path5 = os.path.join(FIGURES_DIR, '5_timeslot_utilization.png')
+    path5 = os.path.join(FIGURES_DIR, '3_timeslot_utilization.png')
     plt.savefig(path5, dpi=300, bbox_inches='tight')
     print(f"Timeslot utilization chart saved: {path5}")
     plt.close()
     
-    # Figure 5b: Dock Utilization by Time Slot (4 category charts)
+    # Figure 3b: Dock Utilization by Time Slot (4 category charts)
     if hourly_data_all:
         categories_directions = [
             ('FG', 'inbound', 'FG - Inbound - Slot Utilization', '#4A90E2', '#E8F4FF'),
@@ -1960,7 +1876,7 @@ def visualize_results(comparison_df, all_results=None):
             
             plt.tight_layout()
             safe_title = title.replace(' ', '_').replace('-', '').lower()
-            path = os.path.join(FIGURES_DIR, f'5b_{safe_title}.png')
+            path = os.path.join(FIGURES_DIR, f'3b_{safe_title}.png')
             plt.savefig(path, dpi=300, bbox_inches='tight')
             print(f"Hourly utilization chart saved: {path}")
             plt.close()
@@ -1971,7 +1887,7 @@ def visualize_results(comparison_df, all_results=None):
     print(f"  - Regional SLA breakdown: 1b.png (G2 vs ROW regions)")
     print(f"  - Flow analysis: 4.png (Pallets), 4b-4d.png (Flow and Order stats)")
     print(f"  - Timeslot: 5.png (Average utilization)")
-    print(f"  - Hourly analysis: 5b_*.png (4 charts: FG/R&P × Inbound/Outbound)")
+    print(f"  - Hourly analysis: 3b_*.png (4 charts: FG/R&P × Inbound/Outbound)")
     print(f"{'='*70}")
 
 
@@ -1995,15 +1911,13 @@ if __name__ == '__main__':
     print("仿真分析完成！生成的文件：")
     print("  1. simulation_results_comparison.xlsx - 场景对比汇总表")
     print("  2. simulation_details_*.xlsx - 各场景详细数据")
-    print("  3. 共15张可视化图片：")
-    print("     - 1: SLA遵守率")
-    print("     - 1b: 按地区分解的SLA(G2 vs ROW)")
-    print("     - 2: 平均卡车等待时间")
-    print("     - 3: 平均午夜积压")
-    print("     - 4: 流量统计（托盘）")
-    print("     - 4b: FG按地区分解的出库流量（托盘）")
-    print("     - 4c: 托盘流量与订单流量并列对比")
-    print("     - 4d: FG按地区分解的出库订单数")
-    print("     - 5: Timeslot平均利用率")
-    print("     - 5b_*: 4张时段详细分析（FG/R&P × Inbound/Outbound）")
+    print("  3. 共8张可视化图片：")
+    print("     - 1: 准时率")
+    print("     - 1b: 按地区分解的准时率(G2 vs ROW)")
+    print("     - 2: 流量统计（托盘）")
+    print("     - 2b: FG按地区分解的出库流量（托盘）")
+    print("     - 2c: 托盘流量与订单流量并列对比")
+    print("     - 2d: FG按地区分解的出库订单数")
+    print("     - 3: Timeslot平均利用率")
+    print("     - 3b_*: 4张时段详细分析（FG/R&P × Inbound/Outbound）")
     print("="*70)

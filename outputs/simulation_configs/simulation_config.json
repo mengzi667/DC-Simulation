@@ -188,7 +188,7 @@
                 "23": 0
             }
         },
-        "RP": {
+        "R&P": {
             "loading": {
                 "0": 1,
                 "1": 1,
@@ -260,7 +260,7 @@
             "mode": 18,
             "max": 560,
             "mean": 22.65267175572519,
-            "std": 9.69702101671149,
+            "std": 9.697021016711489,
             "median": 22.0,
             "count": 11004
         }
@@ -277,13 +277,73 @@
             "efficiency": 1308.83
         }
     },
+    "generated_orders_path": "D:\\TUD\\Design_Project\\outputs\\simulation_configs\\generated_orders.json",
+    "kpi_monthly_totals": {
+        "FG": {
+            "Inbound": {
+                "1": 31052.0,
+                "2": 25857.0,
+                "3": 26704.0,
+                "4": 30455.0,
+                "5": 32592.0,
+                "6": 26875.0,
+                "7": 32309.0,
+                "8": 27651.0,
+                "9": 28250.0,
+                "10": 30305.0,
+                "11": 29766.0
+            },
+            "Outbound": {
+                "1": 34654.0,
+                "2": 32372.0,
+                "3": 33367.0,
+                "4": 27768.0,
+                "5": 29683.0,
+                "6": 29407.0,
+                "7": 31403.0,
+                "8": 29257.0,
+                "9": 30306.0,
+                "10": 29574.0,
+                "11": 25504.0
+            }
+        },
+        "R&P": {
+            "Inbound": {
+                "1": 10592.0,
+                "2": 11796.0,
+                "3": 13061.0,
+                "4": 12720.0,
+                "5": 13513.0,
+                "6": 13250.0,
+                "7": 14918.0,
+                "8": 16157.0,
+                "9": 12731.0,
+                "10": 14547.0,
+                "11": 13467.0
+            },
+            "Outbound": {
+                "1": 9813.0,
+                "2": 10901.0,
+                "3": 14488.0,
+                "4": 11669.0,
+                "5": 15078.0,
+                "6": 12132.0,
+                "7": 13910.0,
+                "8": 14325.0,
+                "9": 11466.0,
+                "10": 14809.0,
+                "11": 14403.0
+            }
+        }
+    },
+    "opening_hour_coefficient": 1.0,
     "data_source": {
         "efficiency_source": "KPI sheet 2025.xlsx (11 months)",
         "demand_source": "Total Shipments 2025.xlsx (full year)",
         "dock_capacity_source": "Timeslot by week W1-W48.xlsx (48 weeks)",
         "pallet_distribution_source": "Total Shipments 2025.xlsx analysis",
         "fte_source": "Hardcoded",
-        "extraction_date": "2026-01-11",
+        "extraction_date": "2026-01-15",
         "year": 2025
     }
 }

@@ -1,0 +1,18 @@
+现在的核心问题：KPIsheet数据和totalshipments数据存在不匹配，总量应该以KPIsheet数据为准，但是详细的order信息记录只有totalshipments有，对机制进行微调：
+
+FG outbound:
+1.total pallet:使用KPIsheet中的每月的平均数据。
+2.total order:使用totalshipments的行数统计，但是注意每个月要跟据total pallet的KPIsheet数据和totalshipments数据的比例进行按比例的矫正，作为正确的total order。
+3.pallet per order:在total tpallet和total order的总数都确定之后，再根据total shipment数据的pallet per order分布情况进行分配。
+以上三点用于解决数据不匹配的问题。
+4.order现在时标准的订单数据，而不是truck，而且order会提前一段时间（Order creation time）将需求发送到DC，DC接到需求后会根据order信息进行备货，然后分配一个timeslot用于给未来（Timeslot时刻）到达的的对应的truck进行装货。
+5.order数据还是要生成，应该有以下属性：1.pallet数量，从pallet per order的分布确定；2.order生成的日期（月日，不包含时刻），按照每月total order平均到每天确定每天order的量；3.一个region tag：仍然是40%的G2当日，40%的G2次日，20%的ROW次日；4.Order creation time：对于G2当日的order：随机分配一个当日的0-12h的时刻.对于G2次日的order：随机分配一个order生成的日期的前一天的12-24h的时刻。对于ROW次日的order：分配一个order生成的日期的前一天的0h的时刻。5.Timeslot：对于G2当日的order：安排一个Order creation time+5小时到当日24点的timeslot，同时越早越好。对于G2次日的order：分配一个Order creation time后越早越好，且不能超过第二天24点的timeslot。对于ROW次日的order：分配一个Order creation time后越早越好，且不能超过第二天24点的timeslot。
+6.收到order信息后立刻开始进行准备，尽量保证在分配的timeslot时刻之前将所有货处理好，处理规则仍然是FTE数据计算。
+7.依然处理货物有数量上限：根据pallet/FTE * FTE计算，缩短opening hour影响FTE，但是不是简单的成比例，可以考虑乘一个系数
+8.timeslot容量约束：每小时timeslot有上限还是存在的，依然是现在的逻辑，timeslot依据真实数据来确定。
+
+RP outbound：所有规则和FG outbound中的ROW次日的order相同
+
+FG/RP Inbound：
+1.前三点和FG outbound的前三点一样。
+2.仍然是两个过程：一个是货物入库（timeslot时刻），这之后是处理货物。进来，要在24小时内处理货物完成。每个order只有pallet数量和timeslot时刻的属性，时刻从totalshipments提取。（和现在的代码逻辑一致）

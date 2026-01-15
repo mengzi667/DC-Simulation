@@ -47,9 +47,6 @@ docs/doc
 outputs/results/*.xlsx
 outputs/figures/*.png
 
-# Keep architecture diagram
-!outputs/figures/DC_Simulation_Architecture.jpg
-
 # Logs
 *.log
 
