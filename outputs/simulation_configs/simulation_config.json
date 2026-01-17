@@ -260,7 +260,7 @@
             "mode": 18,
             "max": 560,
             "mean": 22.65267175572519,
-            "std": 9.697021016711489,
+            "std": 9.69702101671149,
             "median": 22.0,
             "count": 11004
         }
@@ -277,7 +277,7 @@
             "efficiency": 1308.83
         }
     },
-    "generated_orders_path": "D:\\TUD\\Design_Project\\outputs\\simulation_configs\\generated_orders.json",
+    "generated_orders_path": "d:\\TUD\\Design_Project\\outputs\\simulation_configs\\generated_orders.json",
     "kpi_monthly_totals": {
         "FG": {
             "Inbound": {

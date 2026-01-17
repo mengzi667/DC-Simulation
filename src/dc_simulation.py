@@ -1034,8 +1034,44 @@ class DCSimulation:
     
     # ==================== 新逻辑：订单驱动流程 ====================
     
+    def _calculate_prep_time(self, order):
+        """计算订单的预估备货时间（小时）
+        
+        基于：托盘数 / FTE小时容量
+        """
+        hourly_capacity = self.fte_manager.get_hourly_capacity(
+            order.category,
+            'Outbound',
+            coefficient=self.opening_hour_coefficient
+        )
+        
+        if hourly_capacity <= 0:
+            return 999  # 无法处理，返回很大的值
+        
+        est_prep_time = order.pallets / hourly_capacity
+        return est_prep_time
+    
+    def _calculate_latest_start_time(self, order):
+        """计算订单的最晚备货开始时间
+        
+        公式：latest_start = timeslot_time - est_prep_time
+        
+        返回值：
+            最晚开始时间。如果为负数，说明已经是超紧急情况（预估准备时间超过可用窗口）
+        """
+        est_prep_time = self._calculate_prep_time(order)
+        latest_start = order.timeslot_time - est_prep_time
+        return latest_start
+    
     def outbound_order_scheduler(self, target_month=1):
-        """Outbound订单调度器（新逻辑）
+        """Outbound订单调度器（新逻辑 - 方案2：最晚备货开始时间）
+        
+        优先级算法：
+        1. 计算每个订单的预估备货时间 = pallets / hourly_capacity
+        2. 计算最晚备货开始时间 = timeslot_time - 预估备货时间
+        3. 按最晚开始时间升序排列（越靠近deadline越优先）
+        
+        这样既考虑了生产约束（creation_time），又优先处理时间最紧张的订单
         
         Args:
             target_month: 仿真的目标月份
@@ -1054,10 +1090,41 @@ class DCSimulation:
             print(f"警告: 月份{target_month}无Outbound订单")
             return
         
-        print(f"调度{len(outbound_orders)}个Outbound订单")
+        print(f"\n{'='*100}")
+        print(f"Outbound订单调度 - 共 {len(outbound_orders)} 个订单")
+        print(f"优先级算法：方案2 - 按'最晚备货开始时间'排序（考虑准备时间和deadline）")
+        print(f"{'='*100}")
         
-        # 按creation_time排序
-        outbound_orders.sort(key=lambda o: o.creation_time)
+        # 按"最晚备货开始时间"排序（越靠近deadline越优先）
+        outbound_orders.sort(key=lambda o: self._calculate_latest_start_time(o))
+        
+        # 打印排序结果（前15个）
+        print(f"\n优先级排序（前15个订单）:")
+        print(f"{'序号':<4} {'Order_ID':<8} {'类别':<6} {'托盘':<5} "
+              f"{'预估准备':<8} {'生成时间':<8} {'最晚开始':<8} {'目标时段':<8} {'时间窗':<6} {'状态':<10}")
+        print(f"{'-'*100}")
+        
+        for i, order in enumerate(outbound_orders[:15]):
+            est_prep = self._calculate_prep_time(order)
+            latest_start = self._calculate_latest_start_time(order)
+            avail_window = order.timeslot_time - order.creation_time
+            
+            # 判断订单状态
+            if latest_start < order.creation_time:
+                status = "⚠️超紧急"  # 最晚开始时间已经早于生成时间
+            elif latest_start < self.env.now:
+                status = "⚠️已延期"  # 最晚开始时间已经过了
+            else:
+                margin = latest_start - self.env.now
+                status = f"✓正常({margin:.1f}h)"
+            
+            print(f"{i+1:<4} {order.order_id:<8} {order.category:<6} {order.pallets:<5} "
+                  f"{est_prep:<8.2f} {order.creation_time:<8.1f} {latest_start:<8.1f} "
+                  f"{order.timeslot_time:<8.1f} {avail_window:<6.1f} {status:<10}")
+        
+        if len(outbound_orders) > 15:
+            print(f"... 还有 {len(outbound_orders) - 15} 个订单")
+        print()
         
         for order in outbound_orders:
             # 等待到creation_time启动备货

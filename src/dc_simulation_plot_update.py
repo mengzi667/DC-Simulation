@@ -1044,43 +1044,139 @@ class DCSimulation:
         hour = int(time) % 24
         return self.config['dc_open_time'] <= hour < self.config['dc_close_time']
     
+    # ==================== 优先级计算辅助方法 ====================
+    
+    def _calculate_prep_time(self, order):
+        """计算订单的预估备货时间（小时）
+        
+        基于：托盘数 / FTE小时容量
+        """
+        hourly_capacity = self.fte_manager.get_hourly_capacity(
+            order.category,
+            'Outbound',
+            coefficient=self.opening_hour_coefficient
+        )
+        
+        if hourly_capacity <= 0:
+            return 999  # 无法处理，返回很大的值
+        
+        est_prep_time = order.pallets / hourly_capacity
+        return est_prep_time
+    
+    def _calculate_latest_start_time(self, order):
+        """计算订单的最晚备货开始时间
+        
+        公式：latest_start = timeslot_time - est_prep_time
+        
+        返回值：
+            最晚开始时间。如果为负数，说明已经是超紧急情况（预估准备时间超过可用窗口）
+        """
+        est_prep_time = self._calculate_prep_time(order)
+        latest_start = order.timeslot_time - est_prep_time
+        return latest_start
+    
     # ==================== 新逻辑：订单驱动流程 ====================
     
     def outbound_order_scheduler(self, target_month=1):
-        """Outbound订单调度器（新逻辑）
+        """Outbound订单调度器 - 动态优先级队列调度
+        
+        调度方式：订单按creation_time逐步到达，动态加入优先级队列，
+                 FTE选择队列中优先级最高（latest_start最早）的订单处理
+        
+        这模拟了工厂不提前全知所有订单，而是随着时间逐步接收订单的真实场景。
         
         Args:
             target_month: 仿真的目标月份
         """
+        import heapq
+        
         if not self.orders:
             print("警告: 无订单数据，跳过Outbound订单调度")
             return
         
-        # 收集该月的所有Outbound订单
-        outbound_orders = []
+        # 收集该月的所有Outbound订单，按creation_time排序（到达顺序）
+        all_outbound_orders = []
         for key, orders_list in self.orders.items():
             if f'M{target_month:02d}' in key and 'Outbound' in key:
-                outbound_orders.extend(orders_list)
+                all_outbound_orders.extend(orders_list)
         
-        if not outbound_orders:
+        if not all_outbound_orders:
             print(f"警告: 月份{target_month}无Outbound订单")
             return
         
-        print(f"调度{len(outbound_orders)}个Outbound订单")
+        # 按creation_time排序（确保按到达顺序处理）
+        all_outbound_orders.sort(key=lambda o: o.creation_time)
         
-        # 按creation_time排序
-        outbound_orders.sort(key=lambda o: o.creation_time)
+        print(f"\n{'='*110}")
+        print(f"Outbound订单调度 - 共 {len(all_outbound_orders)} 个订单")
+        print(f"调度方式：动态优先级队列 (按creation_time逐步到达，FTE动态选择最优先级订单)")
+        print(f"优先级规则：latest_start_time 越早 → 优先级越高（deadline越近越优先）")
+        print(f"{'='*110}\n")
         
-        for order in outbound_orders:
-            # 等待到creation_time启动备货
-            if order.creation_time > self.env.now:
-                yield self.env.timeout(order.creation_time - self.env.now)
+        ready_queue = []  # 优先级队列：(latest_start_time, order_id_for_tiebreak, order)
+        order_index = 0   # 追踪下一个要到达的订单索引
+        
+        # 统计信息
+        arrival_count = 0
+        dispatch_count = 0
+        
+        # 启动调度主循环
+        while order_index < len(all_outbound_orders) or ready_queue:
+            # 1️⃣ 检查是否有订单到达
+            while (order_index < len(all_outbound_orders) and 
+                   all_outbound_orders[order_index].creation_time <= self.env.now):
+                
+                order = all_outbound_orders[order_index]
+                latest_start = self._calculate_latest_start_time(order)
+                est_prep = self._calculate_prep_time(order)
+                
+                # 加入优先级队列（使用order_index作为二级排序键避免heapq比较对象）
+                heapq.heappush(ready_queue, 
+                              (latest_start, order_index, order))
+                
+                arrival_count += 1
+                
+                # 日志：订单到达
+                status = "⚠️超紧急" if latest_start < order.creation_time else "✓正常"
+                print(f"[时刻{self.env.now:7.1f}h] 订单到达: {order.order_id:8s} | "
+                      f"Category={order.category} | Pallets={order.pallets:3d} | "
+                      f"Est.Prep={est_prep:5.2f}h | Latest_Start={latest_start:7.1f}h | "
+                      f"Timeslot={order.timeslot_time:7.1f}h | 状态={status}")
+                
+                order_index += 1
             
-            # 启动备货流程
-            self.env.process(self.outbound_preparation_process(order))
+            # 2️⃣ 从队列中选择优先级最高的订单（latest_start最早）
+            if ready_queue:
+                latest_start, _, order = heapq.heappop(ready_queue)
+                dispatch_count += 1
+                
+                est_prep = self._calculate_prep_time(order)
+                priority_rank = len(ready_queue) + 1  # 剩余队列中还有多少个比它优先级低
+                
+                print(f"[时刻{self.env.now:7.1f}h] 开始处理: {order.order_id:8s} | "
+                      f"Latest_Start={latest_start:7.1f}h | Est.Prep={est_prep:5.2f}h | "
+                      f"队列剩余={len(ready_queue):3d} | 处理序号={dispatch_count}")
+                
+                # 启动备货和装货流程
+                self.env.process(self.outbound_preparation_process(order))
+                self.env.process(self.outbound_loading_process(order))
             
-            # 调度装货流程（在timeslot时刻）
-            self.env.process(self.outbound_loading_process(order))
+            else:
+                # 队列为空，等待下一个订单到达
+                if order_index < len(all_outbound_orders):
+                    wait_time = all_outbound_orders[order_index].creation_time - self.env.now
+                    if wait_time > 0:
+                        yield self.env.timeout(wait_time)
+                else:
+                    # 所有订单都已处理，退出
+                    break
+        
+        print(f"\n{'='*110}")
+        print(f"Outbound订单调度完成!")
+        print(f"  - 总订单数: {len(all_outbound_orders)}")
+        print(f"  - 已到达订单: {arrival_count}")
+        print(f"  - 已开始处理: {dispatch_count}")
+        print(f"{'='*110}\n")
     
     def outbound_preparation_process(self, order):
         """Outbound备货流程（从creation_time开始）"""
