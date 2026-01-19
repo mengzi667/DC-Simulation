@@ -188,7 +188,7 @@ def extract_efficiency_parameters():
 
 def extract_demand_distribution(target_year=2025):
     """
-    从 Total Shipments 提取需求分布（全年数据）
+    从 Total Shipments 提取需求分布（仅1-8月数据）
     
     Args:
         target_year: 目标年份（默认 2025）
@@ -197,7 +197,7 @@ def extract_demand_distribution(target_year=2025):
         dict: 包含每小时到达率和每日需求分布
     """
     print("\n" + "=" * 60)
-    print("2. 提取需求分布参数（全年数据）")
+    print("2. 提取需求分布参数（1-8月数据）")
     print("=" * 60)
     
     # 读取数据
@@ -208,11 +208,13 @@ def extract_demand_distribution(target_year=2025):
     inbound_df['Date Hour appointement'] = pd.to_datetime(inbound_df['Date Hour appointement'])
     outbound_df['Date Hour appointement'] = pd.to_datetime(outbound_df['Date Hour appointement'])
     
-    # 使用全年数据
-    inbound_year = inbound_df[inbound_df['Date Hour appointement'].dt.year == target_year]
-    outbound_year = outbound_df[outbound_df['Date Hour appointement'].dt.year == target_year]
+    # 只使用1-8月数据
+    inbound_df['Month'] = inbound_df['Date Hour appointement'].dt.month
+    outbound_df['Month'] = outbound_df['Date Hour appointement'].dt.month
+    inbound_year = inbound_df[(inbound_df['Date Hour appointement'].dt.year == target_year) & (inbound_df['Month'] <= 8)]
+    outbound_year = outbound_df[(outbound_df['Date Hour appointement'].dt.year == target_year) & (outbound_df['Month'] <= 8)]
     
-    print(f"\n{target_year} 年全年数据统计:")
+    print(f"\n{target_year} 年1-8月数据统计:")
     print(f"  入库记录数: {len(inbound_year)}")
     print(f"  出库记录数: {len(outbound_year)}")
     
@@ -484,7 +486,13 @@ def extract_dock_capacity_from_timeslot():
         
         # 提取码头容量的函数（参照Timeslot.py的extract_timeslot_data）
         def extract_capacity(df, condition_type, category):
-            """提取特定条件和类别的容量数据"""
+            """提取特定条件和类别的容量数据
+            
+            策略：
+            1. 统计 Booking taken（实际预约）来确定DC开放小时（有>0预约的小时视为开放）
+            2. 对于开放的小时，计算完整容量 (Booking taken + Available Capacity)
+            3. 对于未开放的小时（无预约），设为容量=0
+            """
             if condition_type == 'outbound':
                 condition_filter = df.iloc[:, 0] == 'Loading'
             else:
@@ -493,7 +501,7 @@ def extract_dock_capacity_from_timeslot():
             category_filter = df.iloc[:, 3] == category
             filtered_df = df[condition_filter & category_filter]
             
-            # 提取Booking taken和Available Capacity
+            # 提取 Booking taken 来判断DC开放时段
             booking_taken = filtered_df[filtered_df.iloc[:, 5] == 'Booking taken'].iloc[:, time_columns].sum()
             available_capacity = filtered_df[filtered_df.iloc[:, 5] == 'Available Capacity'].iloc[:, time_columns].sum()
             
@@ -503,12 +511,23 @@ def extract_dock_capacity_from_timeslot():
             # 计算平均每小时容量（除以天数得到平均值）
             num_days = len(filtered_df[filtered_df.iloc[:, 5] == 'Booking taken']['Date_parsed'].unique())
             if num_days > 0:
-                avg_capacity = total_capacity / num_days
+                avg_booking_taken = booking_taken / num_days
+                avg_total_capacity = total_capacity / num_days
             else:
-                avg_capacity = total_capacity
+                avg_booking_taken = booking_taken
+                avg_total_capacity = total_capacity
             
-            return {hour: int(round(avg_capacity.iloc[hour])) if hour < len(avg_capacity) else 0 
-                    for hour in range(24)}
+            # 根据实际预约判断DC是否开放，开放时使用完整容量
+            result = {}
+            for hour in range(24):
+                if hour < len(avg_booking_taken) and avg_booking_taken.iloc[hour] > 0.1:
+                    # 有实际预约的时段：使用完整容量
+                    result[hour] = int(round(avg_total_capacity.iloc[hour])) if hour < len(avg_total_capacity) else 0
+                else:
+                    # 无实际预约的时段：DC关闭，容量=0
+                    result[hour] = 0
+            
+            return result
         
         # 提取四种组合的容量
         dock_capacity = {
@@ -539,19 +558,28 @@ def extract_dock_capacity_from_timeslot():
 
 
 def extract_pallet_distribution():
-    """从Total Shipments分析托盘数分布"""
+    """从Total Shipments分析托盘数分布（仅1-8月数据）"""
     print("\n" + "=" * 60)
-    print("分析托盘数分布")
+    print("分析托盘数分布（1-8月数据）")
     print("=" * 60)
     
     # 读取 Inbound 和 Outbound 数据（实际sheet名称）
     inbound_df = pd.read_excel(SHIPMENTS_FILE, sheet_name='Inbound Shipments 2025')
     outbound_df = pd.read_excel(SHIPMENTS_FILE, sheet_name='Outbound Shipments 2025')
     
+    # 转换日期并只保留1-8月数据
+    inbound_df['Date Hour appointement'] = pd.to_datetime(inbound_df['Date Hour appointement'])
+    outbound_df['Date Hour appointement'] = pd.to_datetime(outbound_df['Date Hour appointement'])
+    
+    inbound_df['Month'] = inbound_df['Date Hour appointement'].dt.month
+    outbound_df['Month'] = outbound_df['Date Hour appointement'].dt.month
+    inbound_df = inbound_df[inbound_df['Month'] <= 8]
+    outbound_df = outbound_df[outbound_df['Month'] <= 8]
+    
     # 合并所有数据
     all_shipments = pd.concat([inbound_df, outbound_df], ignore_index=True)
     
-    print(f"  总批次数: {len(all_shipments)}")
+    print(f"  总批次数（1-8月）: {len(all_shipments)}")
     
     pallet_distribution = {}
     
@@ -617,12 +645,14 @@ def extract_pallet_distribution():
 
 def extract_monthly_totals_from_kpi():
     """从KPI sheet提取每月总托盘数（权威数据源）
+    仅提取1-8月的数据
     
     Returns:
         dict: {category: {direction: {month: total_pallets}}}
     """
     print("\n" + "=" * 60)
     print("提取KPI月度总托盘数（权威数据源）")
+    print("数据范围: 1-8月")
     print("=" * 60)
     
     df = pd.read_excel(KPI_FILE, sheet_name='Hours & volumes per subgroup', header=None)
@@ -637,25 +667,25 @@ def extract_monthly_totals_from_kpi():
         # 查找Inbound和Outbound的行
         for idx, row in df.iterrows():
             if row[0] == f'{category} - pallets - inbound' and row[1] == 'Actual':
-                inbound_data = pd.to_numeric(row[2:14], errors='coerce')
+                inbound_data = pd.to_numeric(row[2:10], errors='coerce')  # 只提取2:10 (months 1-8)
                 for month_idx, value in enumerate(inbound_data, start=1):
                     if not pd.isna(value):
                         monthly_totals[category]['Inbound'][month_idx] = float(value)
             
             elif row[0] == f'{category} - pallets - outbound' and row[1] == 'Actual':
-                outbound_data = pd.to_numeric(row[2:14], errors='coerce')
+                outbound_data = pd.to_numeric(row[2:10], errors='coerce')  # 只提取2:10 (months 1-8)
                 for month_idx, value in enumerate(outbound_data, start=1):
                     if not pd.isna(value):
                         monthly_totals[category]['Outbound'][month_idx] = float(value)
     
     # 打印汇总
-    print("\nKPI月度总托盘数:")
+    print("\nKPI月度总托盘数 (1-8月):")
     for category in ['FG', 'R&P']:
         for direction in ['Inbound', 'Outbound']:
             total = sum(monthly_totals[category][direction].values())
             months = len(monthly_totals[category][direction])
             avg = total / months if months > 0 else 0
-            print(f"  {category} {direction}: {months}个月, 年总量={total:,.0f}, 月均={avg:,.0f}")
+            print(f"  {category} {direction}: {months}个月, 总量={total:,.0f}, 月均={avg:,.0f}")
     
     return monthly_totals
 
@@ -788,7 +818,7 @@ def generate_orders_for_month(month, category, direction, kpi_total_pallet,
 
 
 def allocate_outbound_timeslots(orders_df, dock_capacity, category):
-    """贪心算法为Outbound订单分配timeslot
+    """改进的贪心算法：优先将订单分配到搜索范围内**利用率最低**的时段
     
     Args:
         orders_df: 订单DataFrame（已有creation_hour和region）
@@ -811,48 +841,90 @@ def allocate_outbound_timeslots(orders_df, dock_capacity, category):
     # 每小时使用计数器 {absolute_hour: count}
     usage_counter = {}
     
+    # 预先计算 DC 的开放时段（有容量 > 0 的时段）
+    open_hours = [h for h in range(24) if capacity_dict.get(h, capacity_dict.get(str(h), 0)) > 0]
+    if not open_hours:
+        # 如果没有开放时段，给订单分配默认值
+        orders_df['timeslot_hour'] = 12
+        return orders_df
+    
+    first_open_hour = min(open_hours)
+    last_open_hour = max(open_hours)
+    
     for idx, row in orders_df.iterrows():
         region = row['region']
         creation_abs = row['creation_time_abs']
         day = row['day']
         
-        # 确定搜索范围
+        # 确定搜索范围（DC运营时间：基于open_hours）
         if region == 'G2_same_day':
-            # creation + 5h 到当日24h
+            # same_day: creation + 5h 到当日的最后开放时段
             start_abs = creation_abs + 5
-            end_abs = day * 24
+            end_abs = day * 24 + last_open_hour
+            # 确保 start_abs 不超过 end_abs
+            if start_abs > end_abs:
+                # 当天无法分配，推到次日
+                start_abs = (day + 1) * 24 + first_open_hour
+                end_abs = (day + 1) * 24 + last_open_hour
         else:  # G2_next_day, ROW_next_day
-            # creation后到次日24h
-            start_abs = max(creation_abs, day * 24)  # 至少从当天开始
-            end_abs = (day + 1) * 24
+            # next_day: 订单在当天生成，分配到次日的开放时段
+            start_abs = (day + 1) * 24 + first_open_hour
+            end_abs = (day + 1) * 24 + last_open_hour
         
-        # 查找最早可用slot
-        allocated = False
+        # 在搜索范围内找到利用率最低的时段
+        best_abs_hour = None
+        min_usage = float('inf')
+        
         for abs_hour in range(int(start_abs), int(end_abs) + 1):
             hour_of_day = abs_hour % 24
             max_capacity = capacity_dict.get(hour_of_day, capacity_dict.get(str(hour_of_day), 0))
             current_usage = usage_counter.get(abs_hour, 0)
             
-            if current_usage < max_capacity:
-                orders_df.at[idx, 'timeslot_hour'] = hour_of_day
-                orders_df.at[idx, 'timeslot_abs'] = abs_hour
-                usage_counter[abs_hour] = current_usage + 1
-                allocated = True
-                break
+            # 只考虑有容量且未满的时段
+            if max_capacity > 0 and current_usage < max_capacity:
+                # 优先选择利用率最低的时段
+                if current_usage < min_usage:
+                    min_usage = current_usage
+                    best_abs_hour = abs_hour
         
-        # 如果无法分配，找最早的可用slot（延误）
-        if not allocated:
-            for abs_hour in range(int(end_abs) + 1, int(end_abs) + 100):
+        # 如果在范围内找到了可用时段，分配
+        if best_abs_hour is not None:
+            hour_of_day = best_abs_hour % 24
+            orders_df.at[idx, 'timeslot_hour'] = hour_of_day
+            orders_df.at[idx, 'timeslot_abs'] = best_abs_hour
+            usage_counter[best_abs_hour] = usage_counter.get(best_abs_hour, 0) + 1
+        else:
+            # 搜索范围内无法分配，扩大搜索到未来 30 天
+            for abs_hour in range(int(end_abs) + 1, int(end_abs) + 30 * 24):
                 hour_of_day = abs_hour % 24
                 max_capacity = capacity_dict.get(hour_of_day, capacity_dict.get(str(hour_of_day), 0))
                 current_usage = usage_counter.get(abs_hour, 0)
                 
-                if current_usage < max_capacity:
+                if max_capacity > 0 and current_usage < max_capacity:
+                    if current_usage < min_usage or min_usage == float('inf'):
+                        min_usage = current_usage
+                        best_abs_hour = abs_hour
+            
+            if best_abs_hour is not None:
+                hour_of_day = best_abs_hour % 24
+                orders_df.at[idx, 'timeslot_hour'] = hour_of_day
+                orders_df.at[idx, 'timeslot_abs'] = best_abs_hour
+                orders_df.at[idx, 'delayed'] = True
+                usage_counter[best_abs_hour] = usage_counter.get(best_abs_hour, 0) + 1
+            else:
+                # 最坏情况：无法找到任何可用时段，分配给最利用率最低的时段（可能超载）
+                min_usage_abs = min(
+                    (usage_counter.get(abs_hour, 0), abs_hour)
+                    for abs_hour in range(int(end_abs), int(end_abs) + 24)
+                    if capacity_dict.get(abs_hour % 24, capacity_dict.get(str(abs_hour % 24), 0)) > 0
+                )
+                if min_usage_abs:
+                    best_abs_hour = min_usage_abs[1]
+                    hour_of_day = best_abs_hour % 24
                     orders_df.at[idx, 'timeslot_hour'] = hour_of_day
-                    orders_df.at[idx, 'timeslot_abs'] = abs_hour
+                    orders_df.at[idx, 'timeslot_abs'] = best_abs_hour
                     orders_df.at[idx, 'delayed'] = True
-                    usage_counter[abs_hour] = current_usage + 1
-                    break
+                    usage_counter[best_abs_hour] = usage_counter.get(best_abs_hour, 0) + 1
     
     return orders_df
 
@@ -1094,67 +1166,56 @@ def main():
         
         # 1. 提取效率参数（基于11个月数据）
         efficiency_params = extract_efficiency_parameters()
-        
-        # 2. 提取需求分布（使用全年数据）
         demand_distribution = extract_demand_distribution(target_year=2025)
-        
-        # 3. 计算工厂生产速率
         production_rates = calculate_factory_production_rate(demand_distribution['daily_demand'])
         
-        # 6. 提取码头容量（48周数据）
-        print("\n提取额外数据维度...")
         dock_capacity = None
         try:
             dock_capacity = extract_dock_capacity_from_timeslot()
         except Exception as e:
             print(f"警告: 提取码头容量失败: {e}")
-            print("  将使用默认值")
         
-        # 7. 分析托盘数分布
         pallet_distribution = None
         try:
             pallet_distribution = extract_pallet_distribution()
         except Exception as e:
             print(f"警告: 分析托盘数分布失败: {e}")
-            print("  将使用默认值")
         
-        # 8. 提取人力资源数据（旧版本，如果没有Input FTE Data.txt）
         fte_data = None
         if not fte_config:
             try:
                 fte_data = extract_fte_from_kpi()
             except Exception as e:
                 print(f"警告: 提取人力资源数据失败: {e}")
-                print("  将使用默认值")
         
-        # ===== 新增：订单生成流程 =====
         print("\n" + "="*70)
-        print("开始生成订单数据（新逻辑）")
+        print("订单生成")
         print("="*70)
         
-        # 9. 提取KPI月度总量
         monthly_totals = None
         try:
             monthly_totals = extract_monthly_totals_from_kpi()
         except Exception as e:
             print(f"错误: 无法提取KPI月度总量: {e}")
-            print("  订单生成将被跳过")
         
-        # 10. 读取shipments原始数据
         inbound_shipments = pd.read_excel(SHIPMENTS_FILE, sheet_name='Inbound Shipments 2025')
         outbound_shipments = pd.read_excel(SHIPMENTS_FILE, sheet_name='Outbound Shipments 2025')
         inbound_shipments['Date Hour appointement'] = pd.to_datetime(inbound_shipments['Date Hour appointement'])
         outbound_shipments['Date Hour appointement'] = pd.to_datetime(outbound_shipments['Date Hour appointement'])
         
-        # 11. 生成所有订单
+        inbound_shipments['Month'] = inbound_shipments['Date Hour appointement'].dt.month
+        outbound_shipments['Month'] = outbound_shipments['Date Hour appointement'].dt.month
+        inbound_shipments = inbound_shipments[inbound_shipments['Month'] <= 8].copy()
+        outbound_shipments = outbound_shipments[outbound_shipments['Month'] <= 8].copy()
+        print(f"\nShipments已过滤至1-8月: Inbound {len(inbound_shipments):,}, Outbound {len(outbound_shipments):,}")
+        
         all_orders = {}
         if monthly_totals and pallet_distribution and dock_capacity:
-            print("\n生成月度订单数据:")
+            print("\n生成订单数据:")
             for category in ['FG', 'R&P']:
                 for direction in ['Inbound', 'Outbound']:
                     shipments_df = inbound_shipments if direction == 'Inbound' else outbound_shipments
-                    
-                    for month in range(1, 13):
+                    for month in range(1, 9):
                         kpi_total = monthly_totals[category][direction].get(month)
                         if kpi_total is None or kpi_total == 0:
                             continue
@@ -1171,7 +1232,6 @@ def main():
                         except Exception as e:
                             print(f"    错误: 生成订单失败 - {e}")
             
-            # 12. 保存订单数据
             if all_orders:
                 orders_output_path = OUTPUT_DIR / 'generated_orders.json'
                 

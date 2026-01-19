@@ -391,25 +391,24 @@ class KPICollector:
         self.outbound_operations = []
         self.hourly_buffer_occupancy = defaultdict(list)
         self.midnight_backlogs = []
-        self.inbound_delays = []  # 新增：记录Inbound 24小时超时
-        self.dock_usage = []  # 新增：记录码头使用情况（用于计算利用率）
+        self.inbound_delays = []
+        self.dock_usage = []
     
     def record_dock_usage(self, hour, dock_type, category, used, available):
         """记录码头使用情况"""
-        # 计算利用率，确保不超过100%（如果used>available说明超容量运行）
         if available > 0:
-            utilization = min(used / available, 1.0)  # 限制最大为100%
+            utilization = min(used / available, 1.0)
         else:
             utilization = 0
             
         self.dock_usage.append({
             'hour': hour,
             'dock_type': dock_type,  # 'loading' or 'reception'
-            'category': category,  # 'FG' or 'R&P'
+            'category': category,
             'used': used,
             'available': available,
             'utilization': utilization,
-            'over_capacity': max(0, used - available)  # 记录超容量部分
+            'over_capacity': max(0, used - available)
         })
     
     def record_inbound_delay(self, category, pallets, arrival_time, processing_end, delay_hours):
@@ -432,14 +431,7 @@ class KPICollector:
         })
     
     def record_truck_wait(self, truck, dc_config):
-        """
-        记录卡车等待时间（仅统计DC开放时间内的等待）
-        
-        排除DC关闭时间，例如：
-        - 卡车23:00到达，第二天6:00开始服务
-        - 总等待7小时，但DC关闭时间6小时不应计入业务等待
-        - 实际业务等待 = 1小时（23:00-24:00）
-        """
+        """记录卡车等待时间（排除DC关闭时间）"""
         total_wait = truck.service_start_time - truck.actual_arrival_time
         
         # 计算跨越了多少个完整的DC关闭周期
@@ -770,27 +762,17 @@ class DCSimulation:
     def __init__(self, env, scenario_config, run_id=1):
         self.env = env
         self.config = scenario_config
-        # backward-compat alias (older code paths may reference dc_config)
         self.dc_config = self.config
         self.run_id = run_id
-        
-        # 初始化资源
         self._init_resources()
-        
-        # KPI 收集器
         self.kpi = KPICollector()
-        
-        # ===== 新逻辑：加载预生成订单 =====
         self.orders = self._load_orders()
-        
-        # 订单队列（FG Outbound） - 保留兼容性
         self.pending_orders = []
-        
         # Opening hour coefficient（可手动调节）
         self.opening_hour_coefficient = scenario_config.get('opening_hour_coefficient', 
                                                              SYSTEM_PARAMETERS.get('opening_hour_coefficient', 1.0))
         
-        # 如果启用到达平滑化，计算优化后的到达率（仅针对Outbound）
+        # 如果启用到达平滑化，计算优化后的到达率
         if self.config.get('arrival_smoothing', False):
             self.arrival_rates = self._smooth_arrival_rates(self.config)
         else:
@@ -1047,10 +1029,7 @@ class DCSimulation:
     # ==================== 优先级计算辅助方法 ====================
     
     def _calculate_prep_time(self, order):
-        """计算订单的预估备货时间（小时）
-        
-        基于：托盘数 / FTE小时容量
-        """
+        """计算订单的预估备货时间（小时）"""
         hourly_capacity = self.fte_manager.get_hourly_capacity(
             order.category,
             'Outbound',
@@ -1058,19 +1037,13 @@ class DCSimulation:
         )
         
         if hourly_capacity <= 0:
-            return 999  # 无法处理，返回很大的值
+            return 999
         
         est_prep_time = order.pallets / hourly_capacity
         return est_prep_time
     
     def _calculate_latest_start_time(self, order):
-        """计算订单的最晚备货开始时间
-        
-        公式：latest_start = timeslot_time - est_prep_time
-        
-        返回值：
-            最晚开始时间。如果为负数，说明已经是超紧急情况（预估准备时间超过可用窗口）
-        """
+        """计算订单的最晚备货开始时间 = timeslot_time - est_prep_time"""
         est_prep_time = self._calculate_prep_time(order)
         latest_start = order.timeslot_time - est_prep_time
         return latest_start
@@ -1080,13 +1053,7 @@ class DCSimulation:
     def outbound_order_scheduler(self, target_month=1):
         """Outbound订单调度器 - 动态优先级队列调度
         
-        调度方式：订单按creation_time逐步到达，动态加入优先级队列，
-                 FTE选择队列中优先级最高（latest_start最早）的订单处理
-        
-        这模拟了工厂不提前全知所有订单，而是随着时间逐步接收订单的真实场景。
-        
-        Args:
-            target_month: 仿真的目标月份
+        订单按creation_time逐步到达，FTE选择队列中优先级最高的订单处理。
         """
         import heapq
         
@@ -1094,7 +1061,7 @@ class DCSimulation:
             print("警告: 无订单数据，跳过Outbound订单调度")
             return
         
-        # 收集该月的所有Outbound订单，按creation_time排序（到达顺序）
+        # 收集该月的所有Outbound订单，按creation_time排序
         all_outbound_orders = []
         for key, orders_list in self.orders.items():
             if f'M{target_month:02d}' in key and 'Outbound' in key:
