@@ -461,7 +461,7 @@ class Order:
 
 class FTEManager:
     """人力资源管理器 - FTE 按运营时长调整"""
-    def __init__(self, operating_hours=18, efficiency_multiplier=1.0):
+    def __init__(self, operating_hours=18, efficiency_multiplier=1.0, fte_adjustment_ratio=None):
         if LOADED_CONFIG and 'fte_config' in LOADED_CONFIG:
             fte_config = LOADED_CONFIG['fte_config']
             self.baseline_fte = {
@@ -495,17 +495,30 @@ class FTEManager:
         self.baseline_hours = 18
         self.operating_hours = operating_hours
         self.operating_ratio = operating_hours / self.baseline_hours
+        self.fte_adjustment_ratio = fte_adjustment_ratio  # 显式FTE调整比例
         self.adjusted_fte = self._calculate_adjusted_fte()
         self.efficiency_multiplier = float(efficiency_multiplier) if efficiency_multiplier is not None else 1.0
         
     def _calculate_adjusted_fte(self):
-        """根据运营时长调整FTE（成本节约型）"""
+        """根据运营时长调整FTE
+        
+        注意：FTE是Full-Time Equivalent，表示标准工作量单位
+        营业时间缩短时，可用FTE工作量应该按比例减少
+        """
         adjusted = {}
         for category in ['FG', 'R&P']:
             adjusted[category] = {}
             for direction in ['Inbound', 'Outbound']:
                 base = self.baseline_fte[category][direction]
-                adjusted[category][direction] = base * self.operating_ratio
+                
+                # 优先使用显式的FTE调整比例（用于班次灵活性分析）
+                if self.fte_adjustment_ratio is not None:
+                    adjustment_ratio = self.fte_adjustment_ratio
+                else:
+                    # 默认按营业时间比例调整（用于时间窗口分析）
+                    adjustment_ratio = self.operating_ratio
+                    
+                adjusted[category][direction] = base * adjustment_ratio
         return adjusted
     
     def get_hourly_capacity(self, category, direction, coefficient=1.0):
@@ -547,7 +560,7 @@ class FTEManager:
 
 class KPICollector:
     """KPI 数据收集和分析"""
-    def __init__(self):
+    def __init__(self, operating_hours=18):
         self.buffer_overflows = []
         self.truck_wait_times = []
         self.sla_misses = []
@@ -558,6 +571,8 @@ class KPICollector:
         self.midnight_backlogs = []
         self.inbound_delays = []
         self.dock_usage = []
+        self.fte_usage = []  # 新增：FTE使用记录
+        self.operating_hours = operating_hours  # 营业时间
     
     def record_dock_usage(self, hour, dock_type, category, used, available):
         """记录码头使用情况"""
@@ -574,6 +589,41 @@ class KPICollector:
             'available': available,
             'utilization': utilization,
             'over_capacity': max(0, used - available)
+        })
+    
+    def record_fte_usage(self, category, direction, processing_time, pallets_processed, available_fte, hourly_capacity):
+        """记录FTE使用情况
+        
+        FTE是硬限制：实际使用的FTE不能超过配置的FTE数量
+        如果工作需求超过配置FTE能力，超出部分会导致延期，而不是超额使用FTE
+        """
+        # FTE效率：每个FTE每月能处理的托盘数（基线18小时营业时间标准）
+        if category == 'FG':
+            fte_efficiency = 665.43  # FG效率：665.43托盘/FTE/月
+        else:  # R&P
+            fte_efficiency = 1308.83  # R&P效率：1308.83托盘/FTE/月
+            
+        # 理论需要的FTE工作量 = 处理的托盘数 / 单FTE处理能力
+        fte_required = pallets_processed / fte_efficiency if fte_efficiency > 0 else 0
+        
+        # 实际使用的FTE = min(理论需求, 配置FTE) - FTE是硬限制，不能超过配置值
+        fte_used = min(fte_required, available_fte)
+        
+        # FTE利用率 = 实际使用的FTE / 配置的FTE（最高100%）
+        fte_utilization = fte_used / available_fte if available_fte > 0 else 0
+        
+        self.fte_usage.append({
+            'category': category,
+            'direction': direction,
+            'processing_time': processing_time,  # 实际处理时间（小时）
+            'pallets_processed': pallets_processed,  # 处理的托盘数
+            'available_fte': available_fte,  # 配置的FTE工作量（已按营业时间调整）
+            'fte_required': fte_required,  # 理论需要的FTE（可能超过配置）
+            'fte_used': fte_used,  # 实际使用的FTE（不超过配置）
+            'fte_utilization': fte_utilization,  # 本次操作的FTE利用率（最高100%）
+            'fte_efficiency': fte_efficiency,  # 单FTE处理能力（基线标准）
+            'actual_efficiency': pallets_processed / processing_time if processing_time > 0 else 0,  # 实际处理效率（托盘/小时）
+            'timestamp': self.env.now if hasattr(self, 'env') else 0  # 添加时间戳
         })
     
     def record_inbound_delay(self, category, pallets, arrival_time, processing_end, delay_hours):
@@ -711,8 +761,12 @@ class KPICollector:
             'from_buffer': False  # 新逻辑中无buffer
         })
     
-    def generate_summary(self):
-        """生成汇总报告"""
+    def generate_summary(self, adjusted_fte=None):
+        """生成汇总报告
+        
+        Args:
+            adjusted_fte: 场景调整后的FTE配置 {'FG': {'Inbound': x, 'Outbound': y}, 'R&P': ...}
+        """
         summary = {}
         
         summary['buffer_overflow_events'] = len(self.buffer_overflows)
@@ -791,6 +845,117 @@ class KPICollector:
             fg_region = [o for o in fg_outbound if o.get('region', '').startswith(region)]
             summary[f'FG_{region}_outbound_pallets'] = sum(o['pallets'] for o in fg_region)
             summary[f'FG_{region}_outbound_orders'] = sum(o.get('order_count', 1) for o in fg_region)
+        
+        # ========== FTE利用率统计（简化版）==========
+        # 逻辑很简单：
+        # 1. 统计一个月处理了多少托盘（分FG和R&P）
+        # 2. 根据FTE效率算出需要多少FTE
+        # 3. 和场景调整后的可用FTE比较
+        
+        # FTE效率（托盘/FTE/月）- 考虑alpha效应
+        base_efficiency = {'FG': 665.43, 'R&P': 1308.83}
+        
+        # 从配置中计算alpha效应（通过analyze_results方法参数传递）
+        if hasattr(self, 'alpha_config') and self.alpha_config:
+            alpha = self.alpha_config.get('alpha', 1.0)
+            baseline_hours = self.alpha_config.get('baseline_hours', 18)
+            operating_hours = self.alpha_config.get('operating_hours', 18)
+            
+            if baseline_hours > 0 and operating_hours > 0:
+                r = operating_hours / baseline_hours
+                efficiency_multiplier = (r ** (alpha - 1.0)) if (alpha != 1.0) else 1.0
+            else:
+                efficiency_multiplier = 1.0
+                
+            # 使用调整后的效率（考虑alpha效应）
+            FTE_EFFICIENCY = {
+                'FG': base_efficiency['FG'] * efficiency_multiplier,
+                'R&P': base_efficiency['R&P'] * efficiency_multiplier
+            }
+        else:
+            # 默认效率
+            FTE_EFFICIENCY = base_efficiency
+        
+        # 使用仿真实例中的FTEManager调整后的FTE配置（包含alpha效应）
+        if hasattr(self, 'fte_manager') and self.fte_manager:
+            FTE_AVAILABLE = {
+                'FG_inbound': self.fte_manager.adjusted_fte['FG']['Inbound'],
+                'FG_outbound': self.fte_manager.adjusted_fte['FG']['Outbound'],
+                'R&P_inbound': self.fte_manager.adjusted_fte['R&P']['Inbound'],
+                'R&P_outbound': self.fte_manager.adjusted_fte['R&P']['Outbound']
+            }
+        # 使用场景调整后的FTE配置（如果传入），否则用全局配置
+        elif adjusted_fte:
+            FTE_AVAILABLE = {
+                'FG_inbound': adjusted_fte['FG']['Inbound'],
+                'FG_outbound': adjusted_fte['FG']['Outbound'],
+                'R&P_inbound': adjusted_fte['R&P']['Inbound'],
+                'R&P_outbound': adjusted_fte['R&P']['Outbound']
+            }
+        elif LOADED_CONFIG and 'fte_config' in LOADED_CONFIG:
+            fte_cfg = LOADED_CONFIG['fte_config']
+            FTE_AVAILABLE = {
+                'FG_inbound': fte_cfg['FG']['Inbound'],
+                'FG_outbound': fte_cfg['FG']['Outbound'],
+                'R&P_inbound': fte_cfg['R&P']['Inbound'],
+                'R&P_outbound': fte_cfg['R&P']['Outbound']
+            }
+        else:
+            # 默认配置
+            FTE_AVAILABLE = {
+                'FG_inbound': 44.75, 'FG_outbound': 44.75,
+                'R&P_inbound': 10.025, 'R&P_outbound': 10.025
+            }
+        
+        # 从已记录的操作中统计托盘数
+        fg_inbound_pallets = sum(o['pallets'] for o in self.inbound_operations if o['category'] == 'FG')
+        fg_outbound_pallets = sum(o['pallets'] for o in self.outbound_operations if o['category'] == 'FG')
+        rp_inbound_pallets = sum(o['pallets'] for o in self.inbound_operations if o['category'] == 'R&P')
+        rp_outbound_pallets = sum(o['pallets'] for o in self.outbound_operations if o['category'] == 'R&P')
+        
+        # 理论需求FTE = 托盘数 / 效率（如果要按标准效率完成这些工作，理论上需要多少FTE）
+        fg_inbound_fte_needed = fg_inbound_pallets / FTE_EFFICIENCY['FG']
+        fg_outbound_fte_needed = fg_outbound_pallets / FTE_EFFICIENCY['FG']
+        rp_inbound_fte_needed = rp_inbound_pallets / FTE_EFFICIENCY['R&P']
+        rp_outbound_fte_needed = rp_outbound_pallets / FTE_EFFICIENCY['R&P']
+        
+        # 实际使用FTE = min(需求, 可用) — FTE是硬限制，不可能超过配置人数
+        fg_inbound_fte_used = min(fg_inbound_fte_needed, FTE_AVAILABLE['FG_inbound'])
+        fg_outbound_fte_used = min(fg_outbound_fte_needed, FTE_AVAILABLE['FG_outbound'])
+        rp_inbound_fte_used = min(rp_inbound_fte_needed, FTE_AVAILABLE['R&P_inbound'])
+        rp_outbound_fte_used = min(rp_outbound_fte_needed, FTE_AVAILABLE['R&P_outbound'])
+        
+        # 利用率 = 实际使用 / 可用（最高100%）
+        summary['FG_inbound_fte_utilization_rate'] = fg_inbound_fte_used / FTE_AVAILABLE['FG_inbound'] if FTE_AVAILABLE['FG_inbound'] > 0 else 0
+        summary['FG_outbound_fte_utilization_rate'] = fg_outbound_fte_used / FTE_AVAILABLE['FG_outbound'] if FTE_AVAILABLE['FG_outbound'] > 0 else 0
+        summary['R&P_inbound_fte_utilization_rate'] = rp_inbound_fte_used / FTE_AVAILABLE['R&P_inbound'] if FTE_AVAILABLE['R&P_inbound'] > 0 else 0
+        summary['R&P_outbound_fte_utilization_rate'] = rp_outbound_fte_used / FTE_AVAILABLE['R&P_outbound'] if FTE_AVAILABLE['R&P_outbound'] > 0 else 0
+        
+        # 保存详细数据
+        summary['FG_inbound_fte_needed'] = fg_inbound_fte_needed
+        summary['FG_outbound_fte_needed'] = fg_outbound_fte_needed
+        summary['R&P_inbound_fte_needed'] = rp_inbound_fte_needed
+        summary['R&P_outbound_fte_needed'] = rp_outbound_fte_needed
+        
+        summary['FG_inbound_fte_used'] = fg_inbound_fte_used
+        summary['FG_outbound_fte_used'] = fg_outbound_fte_used
+        summary['R&P_inbound_fte_used'] = rp_inbound_fte_used
+        summary['R&P_outbound_fte_used'] = rp_outbound_fte_used
+        
+        summary['FG_inbound_fte_available'] = FTE_AVAILABLE['FG_inbound']
+        summary['FG_outbound_fte_available'] = FTE_AVAILABLE['FG_outbound']
+        summary['R&P_inbound_fte_available'] = FTE_AVAILABLE['R&P_inbound']
+        summary['R&P_outbound_fte_available'] = FTE_AVAILABLE['R&P_outbound']
+        
+        # 整体FTE统计
+        total_fte_needed = fg_inbound_fte_needed + fg_outbound_fte_needed + rp_inbound_fte_needed + rp_outbound_fte_needed
+        total_fte_used = fg_inbound_fte_used + fg_outbound_fte_used + rp_inbound_fte_used + rp_outbound_fte_used
+        total_fte_available = FTE_AVAILABLE['FG_inbound'] + FTE_AVAILABLE['FG_outbound'] + FTE_AVAILABLE['R&P_inbound'] + FTE_AVAILABLE['R&P_outbound']
+        
+        summary['overall_fte_utilization_rate'] = total_fte_used / total_fte_available if total_fte_available > 0 else 0
+        summary['total_fte_needed'] = total_fte_needed
+        summary['total_fte_used'] = total_fte_used
+        summary['total_fte_available'] = total_fte_available
         
         # 缓冲区平均占用率
         for category in ['R&P', 'FG']:
@@ -912,6 +1077,204 @@ class KPICollector:
                 pd.DataFrame(self.completed_orders).to_excel(writer, sheet_name='Completed_Orders', index=False)
             if self.midnight_backlogs:
                 pd.DataFrame(self.midnight_backlogs).to_excel(writer, sheet_name='Midnight_Backlogs', index=False)
+            if self.fte_usage:
+                pd.DataFrame(self.fte_usage).to_excel(writer, sheet_name='FTE_Usage', index=False)
+                
+                # 创建FTE汇总统计表
+                fte_summary_data = []
+                fte_summary_data.append({'Metric': 'Overall FTE Utilization Rate', 'Value': summary.get('overall_fte_utilization_rate', 0)})
+                
+                for category in ['FG', 'R&P']:
+                    for direction in ['Inbound', 'Outbound']:
+                        prefix = f'{category.lower()}_{direction.lower()}'
+                        fte_summary_data.append({
+                            'Metric': f'{category} {direction} FTE Utilization Rate',
+                            'Value': summary.get(f'{prefix}_fte_utilization_rate', 0)
+                        })
+                        fte_summary_data.append({
+                            'Metric': f'{category} {direction} Total FTE Used',
+                            'Value': summary.get(f'{prefix}_total_fte_used', 0)
+                        })
+                        fte_summary_data.append({
+                            'Metric': f'{category} {direction} Total Pallets Processed',
+                            'Value': summary.get(f'{prefix}_total_pallets_processed', 0)
+                        })
+                        fte_summary_data.append({
+                            'Metric': f'{category} {direction} Average Efficiency (pallets/hour)',
+                            'Value': summary.get(f'{prefix}_avg_efficiency', 0)
+                        })
+                
+                # 总体统计
+                total_fte_used = sum(f['fte_used'] for f in self.fte_usage)
+                
+                # 正确的总可用FTE计算
+                unique_fte_configs = {}
+                for f in self.fte_usage:
+                    key = f"{f['category']}_{f['direction']}"
+                    if key not in unique_fte_configs:
+                        unique_fte_configs[key] = f['available_fte']
+                total_fte_available = sum(unique_fte_configs.values())
+                
+                total_pallets = sum(f['pallets_processed'] for f in self.fte_usage)
+                
+                fte_summary_data.append({'Metric': 'Total FTE Used', 'Value': total_fte_used})
+                fte_summary_data.append({'Metric': 'Total FTE Available (Configured)', 'Value': total_fte_available})
+                fte_summary_data.append({'Metric': 'Total Pallets Processed', 'Value': total_pallets})
+                fte_summary_data.append({'Metric': 'Overall FTE Utilization Rate', 'Value': total_fte_used / total_fte_available if total_fte_available > 0 else 0})
+                
+                fte_summary_df = pd.DataFrame(fte_summary_data)
+                fte_summary_df.to_excel(writer, sheet_name='FTE_Summary', index=False)
+            if self.dock_usage:
+                pd.DataFrame(self.dock_usage).to_excel(writer, sheet_name='Dock_Usage', index=False)
+            if self.inbound_operations:
+                pd.DataFrame(self.inbound_operations).to_excel(writer, sheet_name='Inbound_Operations', index=False)
+            if self.outbound_operations:
+                pd.DataFrame(self.outbound_operations).to_excel(writer, sheet_name='Outbound_Operations', index=False)
+
+
+# ==================== 订单流程追踪器 ====================
+
+class OrderTracker:
+    """订单全流程追踪器 - 记录每个订单从生成到完成的完整事件日志
+    
+    用于演示/展示时详细展示单个订单的生命周期。
+    """
+    
+    def __init__(self, enabled=False, track_order_ids=None):
+        """
+        Args:
+            enabled: 是否启用追踪
+            track_order_ids: 要追踪的订单ID列表（None=追踪所有订单）
+        """
+        self.enabled = enabled
+        self.track_order_ids = set(track_order_ids) if track_order_ids else None
+        self.event_log = []  # 详细事件日志
+        self.order_summary = {}  # 每个订单的关键时间戳汇总
+    
+    def _should_track(self, order):
+        """判断是否需要追踪该订单"""
+        if not self.enabled:
+            return False
+        if self.track_order_ids is None:
+            return True
+        return order.order_id in self.track_order_ids
+    
+    def _sim_time_to_str(self, sim_time):
+        """将仿真时间（小时）转换为可读字符串 Day X, HH:00"""
+        if sim_time is None:
+            return 'N/A'
+        day = int(sim_time) // 24 + 1
+        hour = int(sim_time) % 24
+        minute = int((sim_time % 1) * 60)
+        return f'Day {day}, {hour:02d}:{minute:02d}'
+    
+    def log_event(self, order, event_type, sim_time, details='', **extra):
+        """记录一个追踪事件"""
+        if not self._should_track(order):
+            return
+        
+        event = {
+            'order_id': order.order_id,
+            'category': order.category,
+            'direction': order.direction,
+            'event_type': event_type,
+            'sim_time_h': round(sim_time, 3),
+            'readable_time': self._sim_time_to_str(sim_time),
+            'details': details,
+        }
+        event.update(extra)
+        self.event_log.append(event)
+        
+        # 初始化汇总记录
+        oid = order.order_id
+        if oid not in self.order_summary:
+            self.order_summary[oid] = {
+                'order_id': oid,
+                'category': order.category,
+                'direction': order.direction,
+                'pallets': order.pallets,
+                'region': getattr(order, 'region', None),
+            }
+        
+        # 更新汇总时间戳
+        ts_key = event_type.lower().replace(' ', '_')
+        self.order_summary[oid][f'{ts_key}_time'] = round(sim_time, 3)
+        self.order_summary[oid][f'{ts_key}_readable'] = self._sim_time_to_str(sim_time)
+    
+    def finalize_order(self, order, sim_time):
+        """订单完成时的最终汇总"""
+        if not self._should_track(order):
+            return
+        oid = order.order_id
+        if oid in self.order_summary:
+            s = self.order_summary[oid]
+            s['completed'] = order.completed
+            s['on_time'] = getattr(order, 'on_time', None)
+            s['delay_hours'] = getattr(order, 'delay_hours', 0)
+            s['actual_timeslot'] = getattr(order, 'actual_timeslot', None)
+            s['scheduled_timeslot'] = int(order.timeslot_time) if order.timeslot_time is not None else None
+            s['final_time'] = round(sim_time, 3)
+            s['final_readable'] = self._sim_time_to_str(sim_time)
+    
+    def export_to_excel(self, filepath):
+        """导出追踪日志到Excel"""
+        if not self.event_log:
+            print('OrderTracker: 无事件日志可导出')
+            return
+        
+        with pd.ExcelWriter(filepath, engine='openpyxl') as writer:
+            # Sheet 1: 订单汇总概览
+            summary_df = pd.DataFrame(list(self.order_summary.values()))
+            if not summary_df.empty:
+                summary_df.to_excel(writer, sheet_name='Order_Summary', index=False)
+            
+            # Sheet 2: 完整事件日志
+            log_df = pd.DataFrame(self.event_log)
+            log_df.to_excel(writer, sheet_name='Event_Log', index=False)
+            
+            # Sheet 3: 单个订单详细叙事（取第一个追踪的订单作为示例）
+            if self.event_log:
+                example_id = self.event_log[0]['order_id']
+                example_events = [e for e in self.event_log if e['order_id'] == example_id]
+                example_df = pd.DataFrame(example_events)
+                example_df.to_excel(writer, sheet_name='Example_Order_Detail', index=False)
+                
+                # Sheet 4: 叙述性描述
+                narrative = self._generate_narrative(example_id)
+                narrative_df = pd.DataFrame({'Order Flow Narrative': narrative})
+                narrative_df.to_excel(writer, sheet_name='Example_Narrative', index=False)
+        
+        print(f'OrderTracker: 日志已导出到 {filepath}')
+        print(f'  - 追踪订单数: {len(self.order_summary)}')
+        print(f'  - 总事件数: {len(self.event_log)}')
+    
+    def _generate_narrative(self, order_id):
+        """为单个订单生成叙述性流程描述"""
+        events = [e for e in self.event_log if e['order_id'] == order_id]
+        if not events:
+            return ['No events found']
+        
+        summary = self.order_summary.get(order_id, {})
+        narrative = []
+        narrative.append(f'=== Order Flow Narrative: {order_id} ===')
+        narrative.append(f'Category: {summary.get("category", "?")} | Direction: {summary.get("direction", "?")} | Pallets: {summary.get("pallets", "?")} | Region: {summary.get("region", "N/A")}')
+        narrative.append('')
+        
+        step = 1
+        for e in events:
+            line = f'Step {step}: [{e["readable_time"]}] {e["event_type"]} - {e["details"]}'
+            narrative.append(line)
+            step += 1
+        
+        narrative.append('')
+        if summary.get('on_time') is True:
+            narrative.append(f'✅ Result: Order completed ON TIME')
+        elif summary.get('on_time') is False:
+            narrative.append(f'⚠️ Result: Order DELAYED by {summary.get("delay_hours", 0)} hours')
+        else:
+            narrative.append(f'Result: {"Completed" if summary.get("completed") else "Incomplete"}')
+        
+        return narrative
 
 
 # ==================== 主仿真类 ====================
@@ -919,15 +1282,19 @@ class KPICollector:
 class DCSimulation:
     """配送中心仿真主控制器"""
     
-    def __init__(self, env, scenario_config, run_id=1):
+    def __init__(self, env, scenario_config, run_id=1, order_tracker=None):
         self.env = env
         self.config = scenario_config
         self.dc_config = self.config
         self.run_id = run_id
         self._init_resources()
-        self.kpi = KPICollector()
+        # 传递营业时间给KPICollector
+        operating_hours = scenario_config.get('operating_hours', 18)
+        self.kpi = KPICollector(operating_hours=operating_hours)
         self.orders = self._load_orders()
         self.pending_orders = []
+        # 订单追踪器（可选）
+        self.order_tracker = order_tracker if order_tracker else OrderTracker(enabled=False)
         # Opening hour coefficient（可手动调节）
         self.opening_hour_coefficient = scenario_config.get('opening_hour_coefficient', 
                                                              SYSTEM_PARAMETERS.get('opening_hour_coefficient', 1.0))
@@ -956,7 +1323,7 @@ class DCSimulation:
             total_orders = sum(len(orders) for orders in self.orders.values())
             print(f"  已加载订单: {total_orders} 个")
         
-        # 打印FTE配置信息
+        # 打印FTE配置信息  
         print(f"  FTE调整比例: {self.fte_manager.operating_ratio:.1%}")
         print(f"  成本节约预期: {self.fte_manager.get_cost_savings():.1%}")
         print(f"\n调整后的FTE配置:")
@@ -1071,7 +1438,8 @@ class DCSimulation:
 
         self.fte_manager = FTEManager(
             operating_hours=operating_hours,
-            efficiency_multiplier=efficiency_multiplier
+            efficiency_multiplier=efficiency_multiplier,
+            fte_adjustment_ratio=self.config.get('fte_adjustment_ratio')
         )
     
     def _smooth_arrival_rates(self, dc_config):
@@ -1323,10 +1691,20 @@ class DCSimulation:
                 
                 # 日志：订单到达
                 status = "⚠️超紧急" if latest_start < order.creation_time else "✓正常"
-                print(f"[时刻{self.env.now:7.1f}h] 订单到达: {order.order_id:8s} | "
-                      f"Category={order.category} | Pallets={order.pallets:3d} | "
-                      f"Est.Prep={est_prep:5.2f}h | Latest_Start={latest_start:7.1f}h | "
-                      f"Timeslot={order.timeslot_time:7.1f}h | 状态={status}")
+                # print(f"[时刻{self.env.now:7.1f}h] 订单到达: {order.order_id:8s} | "
+                #       f"Category={order.category} | Pallets={order.pallets:3d} | "
+                #       f"Est.Prep={est_prep:5.2f}h | Latest_Start={latest_start:7.1f}h | "
+                #       f"Timeslot={order.timeslot_time:7.1f}h | 状态={status}")
+                
+                # 追踪：订单到达调度器
+                self.order_tracker.log_event(
+                    order, 'ORDER_ARRIVED', self.env.now,
+                    f'Order enters scheduler queue. Pallets={order.pallets}, '
+                    f'Region={order.region}, Timeslot={self.order_tracker._sim_time_to_str(order.timeslot_time)}, '
+                    f'Est.Prep={est_prep:.2f}h, Latest_Start={self.order_tracker._sim_time_to_str(latest_start)}, '
+                    f'Status={status}',
+                    queue_size=len(ready_queue)
+                )
                 
                 order_index += 1
             
@@ -1338,9 +1716,18 @@ class DCSimulation:
                 est_prep = self._calculate_prep_time(order)
                 priority_rank = len(ready_queue) + 1  # 剩余队列中还有多少个比它优先级低
                 
-                print(f"[时刻{self.env.now:7.1f}h] 开始处理: {order.order_id:8s} | "
-                      f"Latest_Start={latest_start:7.1f}h | Est.Prep={est_prep:5.2f}h | "
-                      f"队列剩余={len(ready_queue):3d} | 处理序号={dispatch_count}")
+                # print(f"[时刻{self.env.now:7.1f}h] 开始处理: {order.order_id:8s} | "
+                #       f"Latest_Start={latest_start:7.1f}h | Est.Prep={est_prep:5.2f}h | "
+                #       f"队列剩余={len(ready_queue):3d} | 处理序号={dispatch_count}")
+                
+                # 追踪：订单从优先级队列中取出
+                self.order_tracker.log_event(
+                    order, 'DISPATCHED', self.env.now,
+                    f'Dispatched from priority queue (#{dispatch_count}). '
+                    f'Queue remaining={len(ready_queue)}, '
+                    f'Latest_Start={self.order_tracker._sim_time_to_str(latest_start)}',
+                    dispatch_rank=dispatch_count
+                )
                 
                 # 启动备货和装货流程
                 self.env.process(self.outbound_preparation_process(order))
@@ -1370,16 +1757,36 @@ class DCSimulation:
         total_pallets = order.pallets
         processed_pallets = 0
 
+        # 追踪：备货开始
+        self.order_tracker.log_event(
+            order, 'PREP_START', self.env.now,
+            f'Preparation started. Total pallets={total_pallets}, '
+            f'DC open={self.is_dc_open()}, '
+            f'Timeslot={self.order_tracker._sim_time_to_str(order.timeslot_time)}'
+        )
+
         # 逐步处理直到完成或到达timeslot；仅在DC开门时推进备货
+        _prep_loop_count = 0
         while processed_pallets < total_pallets:
             # 检查是否已到timeslot时刻
             if order.timeslot_time is not None and self.env.now >= order.timeslot_time:
+                # 追踪：timeslot到达但备货未完成
+                self.order_tracker.log_event(
+                    order, 'PREP_TIMESLOT_REACHED', self.env.now,
+                    f'Timeslot reached before prep complete. Processed={processed_pallets:.0f}/{total_pallets} pallets '
+                    f'({processed_pallets/total_pallets*100:.1f}%)'
+                )
                 break
 
             # DC关门：直接跳到下一个开门时刻
             if not self.is_dc_open():
                 next_open = self._next_open_time()
                 if next_open > self.env.now:
+                    self.order_tracker.log_event(
+                        order, 'PREP_DC_CLOSED', self.env.now,
+                        f'DC closed. Waiting until next open={self.order_tracker._sim_time_to_str(next_open)}. '
+                        f'Progress={processed_pallets:.0f}/{total_pallets} pallets'
+                    )
                     yield self.env.timeout(next_open - self.env.now)
                 continue
 
@@ -1408,19 +1815,63 @@ class DCSimulation:
             time_needed = remaining_pallets / hourly_capacity
             actual_time = min(time_needed, time_budget)
 
+            pallets_before = processed_pallets
             yield self.env.timeout(actual_time)
             processed_pallets += hourly_capacity * actual_time
             if processed_pallets > total_pallets:
                 processed_pallets = total_pallets
             order.preparation_pallets_done = processed_pallets
 
+            # 追踪：备货进度（每个工作段记录一次，跳过微量工作段）
+            _prep_loop_count += 1
+            pallets_added = processed_pallets - pallets_before
+            if pallets_added > 0.01:
+                self.order_tracker.log_event(
+                    order, 'PREP_PROGRESS', self.env.now,
+                    f'Work session #{_prep_loop_count}: +{pallets_added:.1f} pallets in {actual_time:.2f}h '
+                    f'(capacity={hourly_capacity:.1f}p/h). Total={processed_pallets:.0f}/{total_pallets} '
+                    f'({processed_pallets/total_pallets*100:.1f}%)',
+                    pallets_done=round(processed_pallets, 1),
+                    hourly_capacity=round(hourly_capacity, 1)
+                )
+
         # 检查是否完成
         if processed_pallets >= total_pallets:
             order.preparation_completed = True
             order.processing_end_time = self.env.now
+            
+            # 追踪：备货完成
+            prep_duration = self.env.now - order.processing_start_time
+            self.order_tracker.log_event(
+                order, 'PREP_COMPLETE', self.env.now,
+                f'Preparation completed! All {total_pallets} pallets ready. '
+                f'Duration={prep_duration:.2f}h. '
+                f'Time until timeslot={order.timeslot_time - self.env.now:.2f}h' if order.timeslot_time else f'Duration={prep_duration:.2f}h'
+            )
+            
+            # 记录FTE使用情况
+            total_processing_time = self.env.now - order.processing_start_time
+            available_fte = self.fte_manager.adjusted_fte[order.category]['Outbound']
+            hourly_capacity = self.fte_manager.get_hourly_capacity(order.category, 'Outbound', coefficient=self.opening_hour_coefficient)
+            
+            self.kpi.record_fte_usage(
+                category=order.category,
+                direction='Outbound',
+                processing_time=total_processing_time,
+                pallets_processed=total_pallets,
+                available_fte=available_fte,
+                hourly_capacity=hourly_capacity
+            )
     
     def outbound_loading_process(self, order):
         """Outbound装货流程（在timeslot时刻）"""
+        # 追踪：等待timeslot
+        self.order_tracker.log_event(
+            order, 'LOADING_WAIT_TIMESLOT', self.env.now,
+            f'Waiting for scheduled timeslot={self.order_tracker._sim_time_to_str(order.timeslot_time)}. '
+            f'Prep completed={order.preparation_completed}'
+        )
+        
         # 等待到timeslot时刻
         if order.timeslot_time and order.timeslot_time > self.env.now:
             yield self.env.timeout(order.timeslot_time - self.env.now)
@@ -1429,6 +1880,14 @@ class DCSimulation:
         if not order.preparation_completed:
             # 备货未完成：该订单不可能按原timeslot完成
             order.on_time = False
+            
+            # 追踪：timeslot到达但备货未完成
+            self.order_tracker.log_event(
+                order, 'LOADING_PREP_NOT_READY', self.env.now,
+                f'Timeslot reached but preparation NOT complete! '
+                f'Prepared={order.preparation_pallets_done:.0f}/{order.pallets} pallets. '
+                f'Order will be DELAYED and rescheduled.'
+            )
 
             # 继续等待备货完成
             while not order.preparation_completed:
@@ -1436,12 +1895,23 @@ class DCSimulation:
 
             # 重新分配到下一个可用的整点timeslot（并尽量避开DC关闭时段/零容量时段）
             new_slot = self.reschedule_delayed_order(order)
+            
+            # 追踪：重新分配timeslot
+            self.order_tracker.log_event(
+                order, 'LOADING_RESCHEDULED', self.env.now,
+                f'Rescheduled to new timeslot={self.order_tracker._sim_time_to_str(new_slot)} '
+                f'(original={self.order_tracker._sim_time_to_str(order.timeslot_time)})'
+            )
 
             # 等待到新timeslot（new_slot 保证不早于当前时间，且为整点）
             if new_slot > self.env.now:
                 yield self.env.timeout(new_slot - self.env.now)
         else:
             # 备货完成：按原timeslot执行（如果容量满，后续仍可能顺延）
+            self.order_tracker.log_event(
+                order, 'LOADING_PREP_READY', self.env.now,
+                f'Preparation already complete. Ready for loading at scheduled timeslot.'
+            )
             if order.timeslot_time is not None:
                 # timeslot_time是整点，但为了稳妥仍做一次对齐
                 slot = int(order.timeslot_time)
@@ -1452,12 +1922,20 @@ class DCSimulation:
         slot_key = f'{order.category.lower()}_loading' if order.category == 'FG' else 'rp_loading'
         
         # 等待可用slot（如果当前小时已满）
+        _waited_for_capacity = False
         while True:
             available = self.hourly_timeslot_capacity.get(slot_key, 0)
             used = self.hourly_timeslot_used.get(slot_key, 0)
             
             if used < available:
                 break
+            
+            if not _waited_for_capacity:
+                self.order_tracker.log_event(
+                    order, 'LOADING_WAIT_CAPACITY', self.env.now,
+                    f'Dock capacity full (used={used}/{available}). Waiting for next hour.'
+                )
+                _waited_for_capacity = True
             
             # 等待下一个小时
             yield self.env.timeout(1)
@@ -1478,11 +1956,27 @@ class DCSimulation:
         # 占用timeslot
         self.hourly_timeslot_used[slot_key] = self.hourly_timeslot_used.get(slot_key, 0) + 1
         
+        # 追踪：装货开始
+        self.order_tracker.log_event(
+            order, 'LOADING_START', self.env.now,
+            f'Loading started at dock. Actual timeslot={self.order_tracker._sim_time_to_str(self.env.now)}, '
+            f'Scheduled={self.order_tracker._sim_time_to_str(order.timeslot_time)}, '
+            f'On-time={order.on_time}'
+        )
+        
         # 装货（1小时）
         loading_start = self.env.now
         yield self.env.timeout(1)
         
         order.completed = True
+        
+        # 追踪：装货完成 + 最终汇总
+        self.order_tracker.log_event(
+            order, 'LOADING_COMPLETE', self.env.now,
+            f'Loading complete! Truck departs. Pallets={order.pallets}, '
+            f'On-time={order.on_time}, Delay={order.delay_hours}h'
+        )
+        self.order_tracker.finalize_order(order, self.env.now)
         
         # 记录KPI
         self.kpi.record_outbound_truck({
@@ -1530,10 +2024,18 @@ class DCSimulation:
     
     def inbound_receiving_process(self, order):
         """Inbound接收流程（在timeslot时刻）"""
+        # 追踪：到达码头
+        self.order_tracker.log_event(
+            order, 'INBOUND_ARRIVAL', self.env.now,
+            f'Truck arrives at reception dock. Pallets={order.pallets}, '
+            f'Timeslot={self.order_tracker._sim_time_to_str(order.timeslot_time)}'
+        )
+        
         # 检查timeslot容量
         slot_key = f'{order.category.lower()}_reception' if order.category == 'FG' else 'rp_reception'
         
         # 等待可用slot
+        _waited_inbound = False
         while True:
             available = self.hourly_timeslot_capacity.get(slot_key, 0)
             used = self.hourly_timeslot_used.get(slot_key, 0)
@@ -1541,10 +2043,22 @@ class DCSimulation:
             if used < available:
                 break
             
+            if not _waited_inbound:
+                self.order_tracker.log_event(
+                    order, 'INBOUND_WAIT_CAPACITY', self.env.now,
+                    f'Reception dock full (used={used}/{available}). Waiting.'
+                )
+                _waited_inbound = True
             yield self.env.timeout(1)
         
         # 占用timeslot
         self.hourly_timeslot_used[slot_key] = self.hourly_timeslot_used.get(slot_key, 0) + 1
+        
+        # 追踪：开始卸货
+        self.order_tracker.log_event(
+            order, 'INBOUND_UNLOADING', self.env.now,
+            f'Unloading started (1 hour). Pallets={order.pallets}'
+        )
         
         # 卸货（1小时）
         unloading_start = self.env.now
@@ -1554,6 +2068,13 @@ class DCSimulation:
         order.processing_deadline = self.env.now + 24
         order.processing_start_time = self.env.now
         
+        # 追踪：卸货完成，开始FTE处理
+        self.order_tracker.log_event(
+            order, 'INBOUND_PROCESSING_START', self.env.now,
+            f'Unloading complete. FTE processing starts. '
+            f'Deadline={self.order_tracker._sim_time_to_str(order.processing_deadline)} (24h window)'
+        )
+        
         # FTE处理（24小时内完成）
         total_pallets = order.pallets
         processed_pallets = 0
@@ -1561,6 +2082,10 @@ class DCSimulation:
         while processed_pallets < total_pallets:
             # 检查是否超过deadline（deadline使用绝对时间，不因关门而暂停）
             if self.env.now >= order.processing_deadline:
+                self.order_tracker.log_event(
+                    order, 'INBOUND_DEADLINE_EXCEEDED', self.env.now,
+                    f'24h processing deadline exceeded! Processed={processed_pallets:.0f}/{total_pallets}'
+                )
                 print(f"警告: 订单{order.order_id}超过24h处理deadline")
                 break
 
@@ -1568,6 +2093,11 @@ class DCSimulation:
             if not self.is_dc_open():
                 next_open = self._next_open_time()
                 if next_open > self.env.now:
+                    self.order_tracker.log_event(
+                        order, 'INBOUND_DC_CLOSED', self.env.now,
+                        f'DC closed. Wait until {self.order_tracker._sim_time_to_str(next_open)}. '
+                        f'Progress={processed_pallets:.0f}/{total_pallets}'
+                    )
                     yield self.env.timeout(next_open - self.env.now)
                 continue
 
@@ -1598,6 +2128,29 @@ class DCSimulation:
         
         order.processing_end_time = self.env.now
         order.completed = True
+        
+        # 追踪：处理完成
+        self.order_tracker.log_event(
+            order, 'INBOUND_COMPLETE', self.env.now,
+            f'Inbound processing complete. Pallets={total_pallets}, '
+            f'Total time={self.env.now - unloading_start:.2f}h, '
+            f'Within deadline={self.env.now <= order.processing_deadline}'
+        )
+        self.order_tracker.finalize_order(order, self.env.now)
+        
+        # 记录FTE使用情况
+        total_processing_time = self.env.now - order.processing_start_time
+        available_fte = self.fte_manager.adjusted_fte[order.category]['Inbound']
+        hourly_capacity = self.fte_manager.get_hourly_capacity(order.category, 'Inbound', coefficient=self.opening_hour_coefficient)
+        
+        self.kpi.record_fte_usage(
+            category=order.category,
+            direction='Inbound',
+            processing_time=total_processing_time,
+            pallets_processed=processed_pallets,
+            available_fte=available_fte,
+            hourly_capacity=hourly_capacity
+        )
         
         # 记录KPI
         self.kpi.record_inbound_truck({
@@ -1669,8 +2222,16 @@ class DCSimulation:
         
         print(f"仿真运行完成！")
         
-        # 生成汇总报告
-        summary = self.kpi.generate_summary()
+        # 生成汇总报告，传入实际使用的FTE配置和alpha配置
+        adjusted_fte = self.fte_manager.adjusted_fte
+        alpha_config = {
+            'alpha': self.config.get('fte_efficiency_alpha', 1.0),
+            'baseline_hours': self.config.get('fte_efficiency_baseline_hours', 18),
+            'operating_hours': self.config.get('operating_hours', 18)
+        }
+        # 将alpha配置传递给KPICollector
+        self.kpi.alpha_config = alpha_config
+        summary = self.kpi.generate_summary(adjusted_fte=adjusted_fte)
         
         # 添加订单统计（新逻辑）
         if self.orders:
@@ -2249,6 +2810,23 @@ def run_scenario_comparison(
             print(f"  平均卡车等待时间: {result['avg_truck_wait_time']:.2f} 小时")
             print(f"  平均午夜积压: {result['avg_midnight_backlog_pallets']:.1f} 托盘")
             
+            # 显示FTE利用率（简化版）
+            if 'overall_fte_utilization_rate' in result:
+                print(f"\n  === FTE利用情况 ===")
+                print(f"  整体FTE利用率: {result['overall_fte_utilization_rate']:.1%}")
+                print(f"  实际使用: {result.get('total_fte_used', 0):.1f} FTE, 可用: {result.get('total_fte_available', 0):.1f} FTE")
+                for category in ['FG', 'R&P']:
+                    for direction in ['inbound', 'outbound']:
+                        key_util = f'{category}_{direction}_fte_utilization_rate'
+                        key_used = f'{category}_{direction}_fte_used'
+                        key_available = f'{category}_{direction}_fte_available'
+                        
+                        if key_util in result:
+                            used = result.get(key_used, 0)
+                            available = result.get(key_available, 0)
+                            util = result[key_util]
+                            print(f"    {category} {direction.capitalize()}: {util:.1%} (使用{used:.1f} / 可用{available:.1f} FTE)")
+            
             # 显示码头利用率
             if result.get('avg_dock_utilization', 0) > 0:
                 print(f"\n  === Timeslot利用率 ===")
@@ -2258,10 +2836,10 @@ def run_scenario_comparison(
                 print(f"    - FG码头: {result['FG_dock_avg_utilization']:.1%}")
                 print(f"    - R&P码头: {result['R&P_dock_avg_utilization']:.1%}")
             
-            # 导出详细数据（仅第一次重复）
-            if rep == 0:
-                output_path = os.path.join(RESULTS_DIR, f'simulation_details_{scenario_name}{details_suffix}.xlsx')
-                sim.kpi.export_to_excel(output_path)
+            # 导出详细数据（仅第一次重复）- 已禁用以减少文件数量
+            # if rep == 0:
+            #     output_path = os.path.join(RESULTS_DIR, f'simulation_details_{scenario_name}{details_suffix}.xlsx')
+            #     sim.kpi.export_to_excel(output_path)
         
         # 计算平均结果
         avg_result = {}
@@ -2339,6 +2917,9 @@ def run_scenario_comparison(
     comparison_path = os.path.join(RESULTS_DIR, f'simulation_results_comparison{output_suffix}.xlsx')
     comparison_df.to_excel(comparison_path)
     
+    # 导出FTE专用结果文件
+    export_fte_results_to_excel(comparison_df, output_suffix)
+    
     print(f"\n{'='*70}")
     print("所有场景仿真完成！")
     print(f"Comparison results saved to: {comparison_path}")
@@ -2347,12 +2928,135 @@ def run_scenario_comparison(
     return all_results, comparison_df
 
 
-def _scenario_transform_fte_power(alpha=0.85, baseline_hours=18):
+def _scenario_transform_fte_power(alpha=0.8, baseline_hours=18):
     """Scenario-A transform: keep everything same, only apply power-law FTE hourly efficiency."""
     def _t(cfg: dict):
         new_cfg = dict(cfg)
         new_cfg['fte_efficiency_alpha'] = float(alpha)
         new_cfg['fte_efficiency_baseline_hours'] = float(baseline_hours)
+        return new_cfg
+    return _t
+
+
+def _scenario_transform_biweekly_cancel_friday_late_shift_with_fte_adjustment(
+    day1_weekday=0,
+    start_week_index=1,
+    cancel_start_hour=15,
+    every_n_weeks=2,
+    baseline_hours=18
+):
+    """Enhanced scenario transform: cancel Friday late shift AND adjust FTE accordingly.
+    
+    Combines shift cancellation with proportional FTE reduction based on lost operating hours.
+    """
+    def _t(cfg: dict):
+        new_cfg = dict(cfg)
+        
+        # Apply shift cancellation logic
+        new_cfg['day1_weekday'] = int(day1_weekday)
+        new_cfg['biweekly_shift_cancel'] = {
+            'day1_weekday': int(day1_weekday),
+            'weekday': 4,  # Friday
+            'start_week_index': int(start_week_index),
+            'every_n_weeks': int(every_n_weeks),
+            'cancel_start_hour': int(cancel_start_hour),
+            'cancel_end_hour': int(new_cfg.get('dc_close_time', 24)),
+        }
+        
+        # Calculate FTE adjustment based on reduced hours
+        # Estimate: if Friday late shift (15-24 = 9h) is cancelled biweekly,
+        # effective weekly reduction = 9h / 2 weeks = 4.5h per week
+        # Weekly operating hours reduction = 4.5 / (7 * original_daily_hours)
+        dc_open = int(new_cfg.get('dc_open_time', 6))
+        dc_close = int(new_cfg.get('dc_close_time', 24))
+        daily_hours = dc_close - dc_open
+        
+        cancelled_hours_per_day = int(new_cfg.get('dc_close_time', 24)) - cancel_start_hour
+        # Biweekly cancellation = 0.5 * cancelled_hours per week on average  
+        avg_weekly_reduction = cancelled_hours_per_day / every_n_weeks
+        avg_daily_reduction = avg_weekly_reduction / 7
+        
+        # New effective daily hours
+        effective_daily_hours = daily_hours - avg_daily_reduction
+        
+        # FTE adjustment ratio
+        fte_adjustment = effective_daily_hours / baseline_hours
+        new_cfg['fte_adjustment_ratio'] = max(0.1, min(1.0, fte_adjustment))
+        
+        return new_cfg
+    return _t
+
+
+def _scenario_transform_weekly_cancel_friday_late_shift_with_fte_adjustment(
+    day1_weekday=0,
+    cancel_start_hour=15,
+    baseline_hours=18
+):
+    """Weekly Friday late shift cancellation with FTE adjustment."""
+    return _scenario_transform_biweekly_cancel_friday_late_shift_with_fte_adjustment(
+        day1_weekday=day1_weekday,
+        start_week_index=0,
+        cancel_start_hour=cancel_start_hour,
+        every_n_weeks=1,
+        baseline_hours=baseline_hours
+    )
+
+
+def _scenario_transform_weekly_cancel_friday_full_day_with_fte_adjustment(
+    day1_weekday=0,
+    baseline_hours=18
+):
+    """Weekly Friday full day cancellation with FTE adjustment."""
+    def _t(cfg: dict):
+        # Apply full day cancellation
+        base_transform = _scenario_transform_weekly_cancel_friday_full_day(day1_weekday)
+        new_cfg = base_transform(cfg)
+        
+        # Calculate FTE adjustment for full day cancellation
+        # Friday is completely off = lose 1/7 of weekly capacity
+        dc_open = int(new_cfg.get('dc_open_time', 6)) 
+        dc_close = int(new_cfg.get('dc_close_time', 24))
+        daily_hours = dc_close - dc_open
+        
+        # Weekly reduction = 1 full day out of 7
+        effective_weekly_hours = 6 * daily_hours  # 6 days instead of 7
+        effective_daily_hours = effective_weekly_hours / 7
+        
+        # FTE adjustment ratio
+        fte_adjustment = effective_daily_hours / baseline_hours
+        new_cfg['fte_adjustment_ratio'] = max(0.1, min(1.0, fte_adjustment))
+        
+        return new_cfg
+    return _t
+
+
+def _scenario_transform_weekly_cancel_tue_thu_late_shift_with_fte_adjustment(
+    day1_weekday=0,
+    cancel_start_hour=15,
+    baseline_hours=18
+):
+    """Weekly Tue+Thu late shift cancellation with FTE adjustment."""
+    def _t(cfg: dict):
+        # Apply Tue+Thu late shift cancellation
+        base_transform = _scenario_transform_weekly_cancel_tue_thu_late_shift(day1_weekday, cancel_start_hour)
+        new_cfg = base_transform(cfg)
+        
+        # Calculate FTE adjustment for 2 days per week late shift cancellation
+        dc_close = int(new_cfg.get('dc_close_time', 24))
+        cancelled_hours_per_day = dc_close - cancel_start_hour
+        
+        # 2 days per week cancellation
+        weekly_cancelled_hours = 2 * cancelled_hours_per_day
+        daily_reduction = weekly_cancelled_hours / 7
+        
+        dc_open = int(new_cfg.get('dc_open_time', 6))
+        daily_hours = dc_close - dc_open
+        effective_daily_hours = daily_hours - daily_reduction
+        
+        # FTE adjustment ratio
+        fte_adjustment = effective_daily_hours / baseline_hours
+        new_cfg['fte_adjustment_ratio'] = max(0.1, min(1.0, fte_adjustment))
+        
         return new_cfg
     return _t
 
@@ -2457,6 +3161,9 @@ def _scenario_transform_weekly_cancel_tue_thu_late_shift(
         ]
         return new_cfg
     return _t
+
+
+# Alpha comparison charts function moved to scripts/fte_visualization.py
 
 
 def visualize_fte_power_overlay_multi(
@@ -3201,6 +3908,81 @@ def visualize_fte_power_overlay(all_results_base, all_results_power, label_base=
 
 # ==================== 可视化 ====================
 
+# FTE utilization charts function moved to scripts/fte_visualization.py
+
+
+# FTE usage charts function moved to scripts/fte_visualization.py
+
+
+# FTE results export function moved to scripts/fte_visualization.py
+
+def export_fte_results_to_excel(comparison_df, output_suffix=''):
+    """Export FTE-related results to a separate Excel file for fte_visualization.py"""
+    scenarios = comparison_df.index.tolist()
+    
+    # Collect FTE-related columns
+    fte_columns = [col for col in comparison_df.columns if 'fte' in col.lower()]
+    
+    if not fte_columns:
+        print("No FTE data available for export.")
+        return
+    
+    fte_path = os.path.join(RESULTS_DIR, f'fte_results{output_suffix}.xlsx')
+    
+    try:
+        with pd.ExcelWriter(fte_path, engine='openpyxl') as writer:
+            # Sheet 1: Summary - overall FTE metrics
+            summary_data = {
+                'Scenario': scenarios,
+                'Total FTE Available': list(comparison_df.get('total_fte_available', pd.Series([0] * len(scenarios))).fillna(0).infer_objects(copy=False)),
+                'Total FTE Used': list(comparison_df.get('total_fte_used', pd.Series([0] * len(scenarios))).fillna(0).infer_objects(copy=False)),
+                'Total FTE Needed': list(comparison_df.get('total_fte_needed', pd.Series([0] * len(scenarios))).fillna(0).infer_objects(copy=False)),
+                'Overall Utilization Rate (%)': [r * 100 for r in comparison_df.get('overall_fte_utilization_rate', pd.Series([0] * len(scenarios))).fillna(0).infer_objects(copy=False)],
+            }
+            summary_df = pd.DataFrame(summary_data)
+            summary_df.to_excel(writer, sheet_name='Summary', index=False)
+            
+            # Sheet 2: FG Details
+            fg_data = {
+                'Scenario': scenarios,
+                'FG Inbound Available': list(comparison_df.get('FG_inbound_fte_available', pd.Series([0] * len(scenarios))).fillna(0).infer_objects(copy=False)),
+                'FG Inbound Used': list(comparison_df.get('FG_inbound_fte_used', pd.Series([0] * len(scenarios))).fillna(0).infer_objects(copy=False)),
+                'FG Inbound Needed': list(comparison_df.get('FG_inbound_fte_needed', pd.Series([0] * len(scenarios))).fillna(0).infer_objects(copy=False)),
+                'FG Inbound Utilization (%)': [r * 100 for r in comparison_df.get('FG_inbound_fte_utilization_rate', pd.Series([0] * len(scenarios))).fillna(0).infer_objects(copy=False)],
+                'FG Outbound Available': list(comparison_df.get('FG_outbound_fte_available', pd.Series([0] * len(scenarios))).fillna(0).infer_objects(copy=False)),
+                'FG Outbound Used': list(comparison_df.get('FG_outbound_fte_used', pd.Series([0] * len(scenarios))).fillna(0).infer_objects(copy=False)),
+                'FG Outbound Needed': list(comparison_df.get('FG_outbound_fte_needed', pd.Series([0] * len(scenarios))).fillna(0).infer_objects(copy=False)),
+                'FG Outbound Utilization (%)': [r * 100 for r in comparison_df.get('FG_outbound_fte_utilization_rate', pd.Series([0] * len(scenarios))).fillna(0).infer_objects(copy=False)],
+            }
+            fg_df = pd.DataFrame(fg_data)
+            fg_df.to_excel(writer, sheet_name='FG Details', index=False)
+            
+            # Sheet 3: R&P Details
+            rp_data = {
+                'Scenario': scenarios,
+                'R&P Inbound Available': list(comparison_df.get('R&P_inbound_fte_available', pd.Series([0] * len(scenarios))).fillna(0).infer_objects(copy=False)),
+                'R&P Inbound Used': list(comparison_df.get('R&P_inbound_fte_used', pd.Series([0] * len(scenarios))).fillna(0).infer_objects(copy=False)),
+                'R&P Inbound Needed': list(comparison_df.get('R&P_inbound_fte_needed', pd.Series([0] * len(scenarios))).fillna(0).infer_objects(copy=False)),
+                'R&P Inbound Utilization (%)': [r * 100 for r in comparison_df.get('R&P_inbound_fte_utilization_rate', pd.Series([0] * len(scenarios))).fillna(0).infer_objects(copy=False)],
+                'R&P Outbound Available': list(comparison_df.get('R&P_outbound_fte_available', pd.Series([0] * len(scenarios))).fillna(0).infer_objects(copy=False)),
+                'R&P Outbound Used': list(comparison_df.get('R&P_outbound_fte_used', pd.Series([0] * len(scenarios))).fillna(0).infer_objects(copy=False)),
+                'R&P Outbound Needed': list(comparison_df.get('R&P_outbound_fte_needed', pd.Series([0] * len(scenarios))).fillna(0).infer_objects(copy=False)),
+                'R&P Outbound Utilization (%)': [r * 100 for r in comparison_df.get('R&P_outbound_fte_utilization_rate', pd.Series([0] * len(scenarios))).fillna(0).infer_objects(copy=False)],
+            }
+            rp_df = pd.DataFrame(rp_data)
+            rp_df.to_excel(writer, sheet_name='R&P Details', index=False)
+            
+            # Sheet 4: Full Data - all FTE columns
+            full_fte_df = comparison_df[fte_columns].copy()
+            full_fte_df.index.name = 'Scenario'
+            full_fte_df.to_excel(writer, sheet_name='Full Data')
+        
+        print(f"FTE results exported to: {fte_path}")
+        
+    except Exception as e:
+        print(f"Error exporting FTE results: {e}")
+
+
 def visualize_results(comparison_df, all_results=None):
     """生成可视化图表"""
     scenarios = comparison_df.index.tolist()
@@ -3225,7 +4007,7 @@ def visualize_results(comparison_df, all_results=None):
 
     scenario_labels = [_clean_scenario_label(SIMULATION_CONFIG[s]['name']) for s in scenarios]
     
-    print(f"\n{'='*70}\n生成可视化图表...\n{'='*70}")
+    print(f"\n{'='*70}\n生成基础可视化图表...\n{'='*70}")
     
     # 提取 hourly 数据用于时段分析
     hourly_data_all = {}
@@ -3818,11 +4600,11 @@ if __name__ == '__main__':
     TARGET_MONTH = 1
     
     RUN_SINGLE_MONTH = False
-    RUN_YEARLY_SUMMARY = True
-    RUN_FTE_POWER_OVERLAY = True  # baseline + α sweep overlay (Scenario A)
+    RUN_YEARLY_SUMMARY = False  # Case 1: 时间窗口变化影响的FTE分析
+    RUN_FTE_POWER_OVERLAY = True  # Case 2: α=0.7,0.8,0.9的FTE弹性分析
     RUN_BIWEEKLY_FRIDAY_LATE_SHIFT_CANCEL_OVERLAY = False  # Scenario A: no timeslot compression
-    RUN_FRIDAY_LATE_SHIFT_CANCEL_ON_SELECTED_WINDOWS = True  # baseline vs 06-22 vs 06-20, each with (none/biweekly/weekly)
-    FTE_POWER_ALPHAS = [0.9, 0.8, 0.7]
+    RUN_FRIDAY_LATE_SHIFT_CANCEL_ON_SELECTED_WINDOWS = False  # Case 3: 班次灵活性策略的FTE分析
+    FTE_POWER_ALPHAS = [0.7, 0.8, 0.9]  # FTE效率弹性参数  # 只测试0.1
     FTE_POWER_BASELINE_HOURS = 18
 
     # Always run the alpha-sweep overlay when enabled (independent from RUN_SINGLE_MONTH)
@@ -3841,6 +4623,9 @@ if __name__ == '__main__':
             safe_alpha = str(alpha).replace('.', 'p')
             suffix = f'_ftepow_a{safe_alpha}'
             lbl = f'α={alpha}'
+            print(f"\n{'='*50}")
+            print(f"开始运行 Alpha = {alpha} 的FTE弹性测试")
+            print(f"{'='*50}")
             res, _df = run_scenario_comparison(
                 scenarios_to_run=None,
                 num_replications=3,
@@ -3854,15 +4639,23 @@ if __name__ == '__main__':
                 details_suffix=suffix
             )
             results_by_label[lbl] = res
+            print(f"Alpha = {alpha} 的FTE弹性测试完成！")
+            
+            # FTE analysis results are now generated separately by fte_visualization.py
 
         # Visualize: full set for baseline + one overlay figure with 4 legend entries.
         visualize_results(comparison_df_base, results_base)
+        
+        # FTE analysis charts are now generated separately by fte_visualization.py
+
         visualize_fte_power_overlay_multi(
             results_base,
             results_by_label,
             label_base='Baseline',
             out_name='compare_fte_power_overlay.png'
         )
+        
+        # Alpha comparison charts are now generated separately by fte_visualization.py
 
     if RUN_SINGLE_MONTH and (not RUN_FTE_POWER_OVERLAY):
         # 运行单月场景对比
@@ -3875,6 +4668,8 @@ if __name__ == '__main__':
 
         # 可视化结果（传入all_results用于hourly数据）
         visualize_results(comparison_df, results)
+        
+        # FTE analysis charts are now generated separately by fte_visualization.py
 
     # Scenario A (requested): cancel Friday late shift every 2 weeks (day1=Mon, start from 2nd Friday)
     # No timeslot compression/reassignment: demand stays the same; supply windows change.
@@ -3988,11 +4783,12 @@ if __name__ == '__main__':
             num_replications=3,
             duration_days=30,
             target_month=TARGET_MONTH,
-            scenario_config_transform=_scenario_transform_biweekly_cancel_friday_late_shift(
+            scenario_config_transform=_scenario_transform_biweekly_cancel_friday_late_shift_with_fte_adjustment(
                 day1_weekday=0,
                 start_week_index=1,
                 cancel_start_hour=15,
-                every_n_weeks=2
+                every_n_weeks=2,
+                baseline_hours=18
             ),
             output_suffix='_fri_cancel_tw_biwk',
             details_suffix='_fri_cancel_tw_biwk'
@@ -4003,9 +4799,10 @@ if __name__ == '__main__':
             num_replications=3,
             duration_days=30,
             target_month=TARGET_MONTH,
-            scenario_config_transform=_scenario_transform_weekly_cancel_friday_late_shift(
+            scenario_config_transform=_scenario_transform_weekly_cancel_friday_late_shift_with_fte_adjustment(
                 day1_weekday=0,
-                cancel_start_hour=15
+                cancel_start_hour=15,
+                baseline_hours=18
             ),
             output_suffix='_fri_cancel_tw_wk',
             details_suffix='_fri_cancel_tw_wk'
@@ -4016,8 +4813,9 @@ if __name__ == '__main__':
             num_replications=3,
             duration_days=30,
             target_month=TARGET_MONTH,
-            scenario_config_transform=_scenario_transform_weekly_cancel_friday_full_day(
-                day1_weekday=0
+            scenario_config_transform=_scenario_transform_weekly_cancel_friday_full_day_with_fte_adjustment(
+                day1_weekday=0,
+                baseline_hours=18
             ),
             output_suffix='_fri_cancel_tw_wkfulloff',
             details_suffix='_fri_cancel_tw_wkfulloff'
@@ -4028,9 +4826,10 @@ if __name__ == '__main__':
             num_replications=3,
             duration_days=30,
             target_month=TARGET_MONTH,
-            scenario_config_transform=_scenario_transform_weekly_cancel_tue_thu_late_shift(
+            scenario_config_transform=_scenario_transform_weekly_cancel_tue_thu_late_shift_with_fte_adjustment(
                 day1_weekday=0,
-                cancel_start_hour=15
+                cancel_start_hour=15,
+                baseline_hours=18
             ),
             output_suffix='_fri_cancel_tw_wktuth',
             details_suffix='_fri_cancel_tw_wktuth'
@@ -4080,8 +4879,43 @@ if __name__ == '__main__':
             out_name='compare_friday_late_shift_cancel_across_time_windows_by_flow_big_5way_RP.png',
             show_value_labels=True
         )
+        
+        # Generate FTE analysis charts for shift flexibility scenarios
+        # Create comparison DataFrame for FTE analysis - use all tested scenarios
+        shift_scenarios = {}
+        for scenario in scenarios_to_run:
+            shift_scenarios[f'Baseline ({scenario})'] = base_res[scenario]
+            shift_scenarios[f'Biweekly Fri off ({scenario})'] = biweekly_res[scenario] 
+            shift_scenarios[f'Weekly Fri off ({scenario})'] = weekly_res[scenario]
+            shift_scenarios[f'Weekly Fri FULL off ({scenario})'] = weekly_full_off_res[scenario]
+            shift_scenarios[f'Weekly Tue+Thu off ({scenario})'] = tue_thu_res[scenario]
+        
+        shift_comparison_df = pd.DataFrame(shift_scenarios).T
+        
+        # FTE analysis charts are now generated separately by fte_visualization.py
 
     if RUN_YEARLY_SUMMARY:
+        # Case 1: 时间窗口变化影响的FTE分析
+        print("\n" + "="*70)
+        print("Case 1: 运行时间窗口变化的FTE分析")
+        print("="*70)
+        
+        # 运行Case 1的基准仿真
+        results_case1, comparison_df_case1 = run_scenario_comparison(
+            scenarios_to_run=None,
+            num_replications=3,
+            duration_days=30,
+            target_month=TARGET_MONTH
+        )
+        
+        # 可视化结果
+        visualize_results(comparison_df_case1, results_case1)
+        
+        # FTE analysis charts are now generated separately by scripts/fte_visualization.py
+        
+        # Export FTE results for Case 1
+        # FTE results export is now handled separately by fte_visualization.py
+        
         # 全年汇总：对所有可用月份的KPI取均值
         run_yearly_scenario_summary(
             scenarios_to_run=None,
@@ -4093,12 +4927,16 @@ if __name__ == '__main__':
     print("\n" + "="*70)
     print("仿真分析完成！生成的文件：")
     print("  1. simulation_results_comparison.xlsx - 场景对比汇总表")
-    print("  2. simulation_details_*.xlsx - 各场景详细数据")
-    print("  3. 可视化图片（见 outputs/figures/）:")
+    print("  2. fte_results*.xlsx - FTE相关结果专用表（由独立脚本生成）")
+    print("  4. 可视化图片（见 outputs/figures/）:")
     print("     - 1_completion_on_time_rate: 完成率 + 准时率（所有订单口径）")
     print("     - 1a_day1_to_day2_rescheduled: 第一天应完成但第二天才完成（量与比例，Outbound）")
     print("     - 1b_sla_by_region: 按地区分解准时率(G2 vs ROW，所有订单口径)")
     print("     - 2/2b/2c/2d: 流量统计（托盘与订单）")
     print("     - 3_timeslot_utilization: Timeslot平均利用率")
     print("     - 3b_*: 时段详细分析（grouped，每张图最多6个scenario，按页输出）")
+    print("     注：FTE专项分析请运行 python scripts/fte_visualization.py")
     print("="*70)
+
+
+# ==================== 主执行函数 ====================

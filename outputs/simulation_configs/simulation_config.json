@@ -277,7 +277,7 @@
             "efficiency": 1308.83
         }
     },
-    "generated_orders_path": "d:\\TUD\\Design_Project\\outputs\\simulation_configs\\generated_orders.json",
+    "generated_orders_path": "outputs/simulation_configs/generated_orders.json",
     "kpi_monthly_totals": {
         "FG": {
             "Inbound": {

@@ -1,0 +1,621 @@
+\chapter{Simulation}
+\label{ch:simulation}
+
+\section{Introduction}
+\label{sec:simulation_introduction}
+
+This chapter presents a discrete-event simulation (DES) model developed to represent the operational dynamics of the distribution center (DC) under different warehouse opening time configurations. The primary purpose of the simulation is to evaluate how reductions in daily opening hours affect operational feasibility, service performance, and resource utilization, without intervening in the real system.
+
+The simulation model serves as the analytical core of this study. It translates empirically observed inbound and outbound flows, processing constraints, labor availability (FTE), and dock capacity limitations into a time-continuous operational environment. The outputs of this model form the basis for the scenario analysis conducted in Chapter~\ref{ch:scenario_analysis}. Accordingly, this chapter focuses exclusively on model formulation, data inputs, process logic, performance measurement, and model verification and validation, without drawing comparative conclusions across scenarios.
+
+\section{System Scope and Boundary}
+\label{sec:system_scope}
+
+The simulation represents internal warehouse operations within a single distribution center. The system boundary is strictly limited to activities occurring from truck arrival at the DC gate to the completion of unloading, internal processing, and outbound loading. External transportation networks, upstream suppliers, and downstream customer transport are not explicitly modeled.
+
+Three operational flows are included:
+
+\begin{itemize}
+    \item FG (Finished Goods) outbound
+    \item R\&P outbound
+    \item FG and R\&P inbound
+\end{itemize}
+
+All flows are modeled at the truck level, with each truck associated with a number of pallets. Order-level attributes such as order identifiers and pallet quantities are tracked throughout the simulation. No spatial representation of the warehouse interior is included; all internal handling activities are aggregated into processing stages constrained by labor capacity.
+
+The temporal resolution of the simulation is continuous, implemented using an event-based framework. Operational constraints such as dock availability and labor capacity are enforced at an hourly level, consistent with the structure of the input data.
+
+% =========================================================
+% 4.3 Simulation model architecture (conceptual, not numeric)
+% =========================================================
+\section{Simulation Model Architecture}
+\label{fig:simulation_architecture_overview}
+
+This study employs a discrete-event simulation (DES) to represent the operational dynamics of a distribution centre under alternative daily opening-time configurations. The simulation is implemented using an event-driven environment and executes multiple concurrent processes that generate arrivals, enforce capacity constraints, and record performance indicators. The overall structure of the simulation model is shown as figure \ref{fig:simulation_architecture_overview}
+
+\begin{figure}[H]
+    \centering
+    \scalebox{0.72}{  % 缩小到72%以适应页面
+    \begin{tikzpicture}[
+        node distance=1.2cm,  % 减小节点间距
+        box/.style={rectangle, draw, text width=2.1cm, text centered, rounded corners, minimum height=0.75cm, thick},
+        entity/.style={box, fill=blue!15},
+        process/.style={box, fill=green!20, text width=2.3cm},
+        resource/.style={box, fill=orange!20, text width=1.9cm},
+        constraint/.style={box, fill=red!15, dashed},
+        manager/.style={box, fill=purple!15, text width=2.2cm},
+        pregen/.style={box, fill=cyan!15, dashed, text width=2.5cm},
+        arrow/.style={->, >=stealth, thick},
+        darrow/.style={->, >=stealth, thick, dashed}
+    ]
+        % ========== TITLE BOXES (Top Layer) ==========
+        \node[box, fill=gray!20, text width=13cm, minimum height=0.6cm, font=\bfseries\small] at (0, 7.5) 
+            {OVERALL SIMULATION ARCHITECTURE: TWO-PHASE DESIGN};
+        
+        % ========== PHASE 1: DATA PREPARATION (Top Section) ==========
+        \node[box, fill=cyan!30, text width=13cm, minimum height=0.55cm, font=\bfseries\footnotesize] at (0, 6.5) 
+            {PHASE 1: DATA PREPARATION (data\_preparation.py)};
+        
+        % UPDATED: Changed from 12 months to 8 months data range
+        \node[pregen] at (-6, 5.3) (input_data) {Input Data\\(Shipments\\1-8 months)};
+        \node[pregen] at (-2.5, 5.3) (generation) {Order\\Generation\\(8 months)};
+        \node[pregen] at (1.5, 5.3) (timeslot_alloc) {Timeslot\\Pre-allocation};
+        \node[pregen] at (5.5, 5.3) (output_json) {generated\_\\orders.json};
+        
+        \draw[arrow] (input_data) -- (generation);
+        \draw[arrow] (generation) -- (timeslot_alloc);
+        \draw[arrow] (timeslot_alloc) -- (output_json);
+        
+        % ========== PHASE 2: SIMULATION EXECUTION (Main Section) ==========
+        \node[box, fill=green!30, text width=13cm, minimum height=0.55cm, font=\bfseries\footnotesize] at (0, 4.0) 
+            {PHASE 2: SIMULATION EXECUTION (dc\_simulation.py)};
+        
+        % ========== LAYER 1: ENTITY TYPES ==========
+        \node[font=\bfseries\small] at (-8.5, 3) {ENTITIES};
+        
+        \node[entity] at (-10, 2) (truck) {Truck\\(Inbound/\\Outbound)};
+        \node[entity] at (-7, 2) (order) {Order\\(Pre-gen\\with timeslot)};
+        
+        % ========== LAYER 2: PROCESS TYPES ==========
+        \node[font=\bfseries\small] at (0, 3) {PROCESSES};
+        
+        \node[process] at (-2, 2) (scheduler) {Order\\Scheduler\\(creation\_time)};
+        \node[process] at (1.5, 2) (inbound_p) {Inbound\\Processing};
+        \node[process] at (5, 2) (outbound_p) {Outbound\\Processing};
+        
+        % ========== LAYER 3: RESOURCE TYPES ==========
+        \node[font=\bfseries\small] at (-8.5, 0.5) {RESOURCES};
+        
+        \node[resource] at (-10, -0.4) (fte_res) {FTE\\Manager};
+        \node[resource] at (-7, -0.4) (timeslot_res) {Timeslot\\Tracker};
+        \node[resource] at (-4, -0.4) (dock_res) {Dock\\Positions};
+        
+        % ========== LAYER 4: CONSTRAINT TYPES ==========
+        \node[font=\bfseries\small] at (0, 0.5) {CONSTRAINTS};
+        
+        \node[constraint] at (-1, -0.4) (hourly_c) {Hourly\\Capacity\\Limits};
+        \node[constraint] at (2, -0.4) (time_c) {Time\\Deadlines};
+        \node[constraint] at (5, -0.4) (operating_c) {DC\\Operating\\Hours\\(scenario)};
+        
+        % ========== LAYER 5: MANAGERS ==========
+        \node[font=\bfseries\small] at (9, 3) {MANAGERS};
+        
+        \node[manager] at (9, 2) (hour_mgr) {Hourly\\Manager};
+        \node[manager] at (9, 0.4) (kpi_mgr) {KPI\\Collector};
+        
+        % ========== LEGEND (Bottom Right) ==========
+        \node[box, fill=gray!10, text width=3.8cm, minimum height=3.3cm, align=left, font=\footnotesize] at (9, -2.2) {
+            \textbf{Legend:}\\[0.04cm]
+            \textcolor{blue!70}{$\blacksquare$} Entity\\
+            \textcolor{green!70}{$\blacksquare$} Process\\
+            \textcolor{orange!70}{$\blacksquare$} Resource\\
+            \textcolor{red!70}{$\blacksquare$} Constraint\\
+            \textcolor{purple!70}{$\blacksquare$} Manager\\
+            \textcolor{cyan!70}{$\blacksquare$} Pre-generation\\[0.04cm]
+        };
+        
+    \end{tikzpicture}
+    }
+    \caption{Overall simulation design architecture}
+    \label{fig:simulation_architecture_overview}
+\end{figure}
+
+\subsection{Time Representation and Scenario Control}
+\label{subsec:time_and_scenarios}
+
+Simulation time is represented on a continuous axis measured in hours. The model differentiates scenarios by specifying a daily opening window (opening hour and closing hour) and the corresponding operating-hours length for each scenario. These scenario definitions are explicitly enumerated in the simulation script and include a baseline case and three reduced-opening cases.
+
+A scenario is therefore fully characterised by:
+\begin{itemize}
+    \item a daily \emph{opening window} during which dock-related service can occur;
+    \item an \emph{operating-hours length} used by the labour-capacity module to scale available workforce.
+\end{itemize}
+
+\subsection{Entities}
+\label{subsec:entities}
+
+Two entity abstractions are used to represent operational objects and service-level accounting.
+
+\paragraph{Truck entity.}
+The operational unit of flow is a \emph{truck} entity representing one inbound or outbound arrival carrying a pallet load. The truck entity stores (i) business category (FG vs R\&P), (ii) direction (Inbound vs Outbound), (iii) pallet quantity, and (iv) a set of timestamps that are populated as the truck progresses through the system (arrival, processing start/end, dock service start/end). For FG outbound, the truck additionally carries a destination-region tag (G2 vs ROW) that determines service-level requirements.
+
+\paragraph{Order entity (service-level accounting object).}
+% UPDATED: Added region attributes and distribution details for FG outbound orders
+An \emph{order} entity exists as a bookkeeping object carrying the pallet volume, order creation time, assigned timeslot, completion time, and category/direction information. For FG outbound orders, each order is assigned a region label (G2\_same\_day, G2\_next\_day, or ROW\_next\_day) following an empirically-calibrated distribution (40\%-40\%-20\%). Orders are pre-generated during the data preparation phase and loaded at simulation start. Each order has a \texttt{creation\_time} attribute that determines when it enters the system, and a pre-allocated timeslot that specifies when dock service should occur.
+
+\subsection{Resources and System State}
+\label{subsec:resources_state}
+
+The simulation represents two classes of capacity constraints: (i) dock/timeslot capacity (loading and reception) and (ii) labor processing capacity (FTE-based throughput).
+
+\paragraph{Dock/timeslot capacity.}
+Dock availability is modeled as an \emph{hourly capacity} for each combination of (category $\times$ dock type). The model tracks, for each hour, how many loading or reception slots are available and how many have been used. These counters are updated on an hourly boundary and are used by inbound and outbound processes to determine whether a truck can start dock service or must wait. The model records dock usage each hour before resetting hourly usage counters.
+
+\paragraph{Labor processing capacity (FTE).}
+Labor is represented via a workforce configuration for FG and R\&P, separately for inbound and outbound. The configuration file provides baseline FTE values and a productivity parameter expressed as an efficiency factor. The simulation uses these inputs to compute an effective processing capacity that constrains internal processing (distinct from dock service). FTE capacity is adjusted proportionally based on the scenario's operating hours relative to the baseline.
+
+\subsection{Execution Flow and Concurrent Processes}
+\label{subsec:execution_flow}
+
+For each simulation replication, the model starts multiple concurrent processes, including (i) an hourly manager that updates dock capacity and logs utilization, (ii) inbound arrival generation, (iii) outbound order scheduler that triggers orders at their creation time, (iv) midnight backlog monitoring and (v) KPI monitoring and visualization. The simulation then advances time until the specified horizon is reached. Specifically, the inbound and outbound process are shown in figure \ref{fig:inbound_architecture} and figure \ref{fig:outbound_architecture}.
+
+
+\begin{figure}[H]
+    \centering
+    \scalebox{0.75}{
+    \begin{tikzpicture}[
+        node distance=1.3cm,
+        entity/.style={rectangle, draw, fill=blue!15, text width=2.1cm, text centered, rounded corners, minimum height=0.9cm, thick},
+        process/.style={rectangle, draw, fill=green!20, text width=2.4cm, text centered, minimum height=0.95cm, thick},
+        resource/.style={ellipse, draw, fill=orange!20, text width=2cm, text centered, minimum height=0.8cm, thick},
+        constraint/.style={rectangle, draw, fill=red!15, text width=2.1cm, text centered, minimum height=0.75cm, dashed, thick},
+        arrow/.style={->, >=stealth, thick},
+        darrow/.style={->, >=stealth, thick, dashed, red}
+    ]
+        % ========== Main Flow (Left to Right) ==========
+        \node[entity] (arrival) {Truck Arrival\\(Poisson $\lambda_h$)};
+        
+        \node[process, right=2cm of arrival] (queue) {Queue for\\Reception Timeslot};
+        
+        \node[process, right=2cm of queue] (unload) {Unloading\\(1 h)};
+        
+        \node[process, right=2cm of unload] (processing) {FTE Process\\(24h limit)};
+        
+        \node[entity, right=2cm of processing] (complete) {Complete};
+        
+        % ========== Resources (Top) ==========
+        \node[resource, above=1.8cm of queue] (timeslot) {Reception\\Timeslot\\Capacity};
+        
+        \node[resource, above=1.8cm of processing] (fte) {FTE Inbound\\Capacity\\(hourly)};
+        
+        % ========== Constraints (Bottom) ==========
+        \node[constraint, below=1.5cm of queue] (timeslot_const) {Hourly\\Timeslot Limit};
+        
+        \node[constraint, below=1.5cm of processing] (deadline) {24-hour\\Processing\\Deadline};
+        
+        % ========== Main Flow Arrows ==========
+        \draw[arrow] (arrival) -- (queue);
+        \draw[arrow] (queue) -- node[above, font=\small] {Allocated} (unload);
+        \draw[arrow] (unload) -- node[above, font=\small] {Unloaded} (processing);
+        \draw[arrow] (processing) -- (complete);
+        
+        % ========== Resource Constraint Arrows ==========
+        \draw[darrow] (timeslot) -- node[right, font=\footnotesize] {Constrains} (queue);
+        \draw[darrow] (fte) -- node[right, font=\footnotesize] {Constrains} (processing);
+        
+        % ========== Constraint Links ==========
+        \draw[darrow] (timeslot_const) -- (queue);
+        \draw[darrow] (deadline) -- (processing);
+        
+    \end{tikzpicture}
+    }
+    \caption{Inbound process architecture}
+    \label{fig:inbound_architecture}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \scalebox{0.72}{
+    \begin{tikzpicture}[
+        node distance=1.2cm,
+        entity/.style={rectangle, draw, fill=blue!15, text width=2.1cm, text centered, rounded corners, minimum height=0.85cm, thick},
+        process/.style={rectangle, draw, fill=green!20, text width=2.2cm, text centered, minimum height=0.9cm, thick},
+        resource/.style={ellipse, draw, fill=orange!20, text width=1.7cm, text centered, minimum height=0.75cm, thick},
+        constraint/.style={rectangle, draw, fill=red!15, text width=2cm, text centered, minimum height=0.7cm, dashed, thick},
+        decision/.style={diamond, draw, fill=purple!15, text width=1.3cm, text centered, minimum height=1.1cm, aspect=2, thick},
+        pregen/.style={rectangle, draw, fill=cyan!15, text width=2.2cm, text centered, minimum height=0.85cm, thick, dashed},
+        arrow/.style={->, >=stealth, thick},
+        darrow/.style={->, >=stealth, thick, dashed, red},
+        trigger/.style={->, >=stealth, thick, dotted, blue}
+    ]
+        % ========== Pre-generation Layer (Top) ==========
+        \node[pregen] (pregen) {Order\\Pre-generation\\(8 months)};
+        
+        % ========== Main Flow (Left to Right) ==========
+        \node[entity, below=1.6cm of pregen] (creation) {Creation Time\\Trigger};
+        
+        \node[process, right=1.5cm of creation] (processing) {FTE Process\\(Prepare)};
+        
+        \node[process, right=1.2cm of processing] (queue) {Wait for\\Pre-allocated\\Timeslot};
+        
+        \node[process, right=2.2cm of queue] (loading) {Loading\\(1 h)};
+        
+        \node[decision, right=1cm of loading] (check) {Timeslot\\Check};
+        
+        \node[entity, right=1.3cm of check] (depart) {Departure};
+        
+        % ========== Resources (Top) ==========
+        \node[resource, above=1.6cm of processing] (fte) {FTE Outbound\\Capacity\\(hourly)};
+        
+        \node[resource, above=1.6cm of queue] (timeslot) {Pre-allocated\\Timeslot\\(at generation)};
+        
+        % ========== Constraints (Bottom) ==========
+        \node[constraint, below=1.4cm of creation] (sim_window) {Simulation\\Window\\(720 hours)};
+        
+        \node[constraint, below=1.4cm of queue] (timeslot_const) {Hourly\\Timeslot Limit};
+        
+        \node[constraint, below=1.4cm of check] (capacity) {Timeslot\\Availability};
+        
+        % ========== Pre-generation Flow ==========
+        \draw[trigger] (pregen) -- node[right, font=\footnotesize] {at creation time} (creation);
+        
+        % ========== Main Flow Arrows ==========
+        \draw[arrow] (creation) -- node[above, font=\small] {Scheduled} (processing);
+        \draw[arrow] (processing) -- node[above, font=\small] {Ready} (queue);
+        \draw[arrow] (queue) -- node[above, font=\small] {Timeslot arrives} (loading);
+        \draw[arrow] (loading) -- (check);
+        \draw[arrow] (check) -- node[above, font=\small] {Success} (depart);
+        
+        % ========== Delayed Path ==========
+        \node[entity, above=2.3cm of check, fill=yellow!20] (delayed) {Delayed\\(Missed Slot)};
+        \draw[arrow, orange] (check) -- node[right, font=\footnotesize] {Missed} (delayed);
+        \draw[arrow] (delayed) -| (depart);
+        
+        \draw[darrow] (fte) -- node[right, font=\footnotesize] {Constrains} (processing);
+        \draw[darrow] (timeslot) -- node[right, font=\footnotesize] {Allocated at generation} (queue);
+        
+        \draw[darrow] (sim_window) -- (creation);
+        \draw[darrow] (timeslot_const) -- (queue);
+        \draw[darrow] (capacity) -- (check);
+        
+    \end{tikzpicture}
+    }
+    \caption{Outbound process architecture}
+    \label{fig:outbound_architecture}
+\end{figure}
+
+% =========================================================
+% 4.4 Inputs and parameterisation (including stochasticity)
+% =========================================================
+\section{Model Inputs and Parameters}
+\label{sec:sim_inputs}
+
+All numerical inputs are provided via an external configuration file generated by a dedicated data-preparation pipeline. The configuration includes (i) hourly arrival-rate profiles for inbound and outbound, (ii) hourly dock/timeslot capacity profiles, (iii) pallet-load distributions by category, (iv) labor (FTE) configuration and productivity parameters, and (v) unloading-efficiency parameters. The configuration file also records data sources and an extraction date to ensure traceability.
+
+\subsection*{Data Sources and Temporal Scope}
+\label{subsec:data_provenance}
+
+% UPDATED: Specified 8-month data range (previously implied 12 months)
+The simulation uses data from the first 8 months of the year. Data from months 9-12 are excluded due to quality concerns identified in the source datasets. The configuration file embeds a \emph{data-source manifest} specifying the origin of key parameter groups, including productivity/efficiency inputs, demand inputs, dock capacity inputs, pallet distribution inputs, and workforce inputs. This manifest is written by the data-preparation script and persisted in the JSON configuration.
+
+\subsection{Inbound Arrival Rates and Arrival Stochasticity}
+\label{subsec:inbound_arrival_rates}
+
+Inbound arrivals are governed by hourly arrival-rate profiles for FG and R\&P derived from historical shipment data. In each simulated hour, the number of inbound arrivals is sampled from a Poisson distribution whose rate parameter equals the configured arrival rate for that category and hour. Within the hour, each sampled arrival is further spread by an additional arrival delay drawn from an exponential distribution with a mean of 0.25 hours (15 minutes), to avoid simultaneous arrivals at the top of the hour.
+
+\subsection{Outbound Order Generation and Scheduling}
+\label{subsec:outbound_arrival_rates}
+
+% UPDATED: Changed from Poisson arrival to pre-generated order-driven mechanism
+Unlike inbound flows, outbound operations are order-driven rather than arrival-driven. Orders are pre-generated during the data preparation phase based on KPI monthly totals and historical shipment patterns. Each order is assigned:
+\begin{itemize}
+    \item A \texttt{creation\_time}: when the order enters the system
+    \item A \texttt{timeslot\_time}: the pre-allocated dock loading slot
+    \item Pallet quantity sampled from category-specific distributions
+    \item Category (FG or R\&P) and direction (Outbound)
+\end{itemize}
+
+During simulation execution, orders are triggered at their \texttt{creation\_time} and processed through FTE-constrained preparation before waiting for their pre-allocated timeslot.
+
+\begin{table}[H]
+    \centering
+    \caption{Arrival and order generation mechanisms by flow direction and category.}
+    \label{tab:arrival_stochasticity}
+    \begin{tabular}{llll}
+        \hline
+        \textbf{Flow} & \textbf{Category} & \textbf{Generation model} & \textbf{Within-hour spreading} \\
+        \hline
+        Inbound  & FG   & Poisson($\lambda_h$) & Exp(0.25 hr) \\
+        Inbound  & R\&P & Poisson($\lambda_h$) & Exp(0.25 hr) \\
+        Outbound & FG   & Pre-generated orders & At creation\_time \\
+        Outbound & R\&P & Pre-generated orders & At creation\_time \\
+        \hline
+    \end{tabular}
+    \\[0.2cm]
+    % UPDATED: Modified table note to reflect order-driven outbound mechanism
+    \footnotesize \textit{Note: Outbound orders are pre-generated with timeslot allocation during data preparation.}
+\end{table}
+
+\subsection{Pallet Load Distributions}
+\label{subsec:pallet_distributions}
+
+% UPDATED: Specified data source as months 1-8 for pallet distributions
+Each inbound truck and outbound order is assigned a pallet load by sampling from a category-specific distribution specified in the configuration. Both FG and R\&P pallet loads are modeled using a triangular distribution parameterized by minimum, mode, and maximum values derived from historical shipment data (months 1-8). The configuration also stores descriptive statistics (mean, standard deviation, median) and sample counts used to estimate the distribution.
+
+\subsection{Dock/Timeslot Capacity Profiles}
+\label{subsec:dock_capacity}
+
+Dock (timeslot) capacities are specified as hourly integer capacities for loading and reception, separately for FG and R\&P. These capacities are extracted from weekly timeslot data by aggregating booked and available capacities and averaging per hour across observed days. The extraction logic is implemented in the data-preparation script and considers only hours where actual booking activity occurred.
+
+\subsection{Unloading Efficiency and Unloading Time Generation}
+\label{subsec:unloading_time}
+
+Inbound unloading time is generated stochastically. The simulation samples an unloading efficiency from a normal distribution, separately parameterized for FG and R\&P, and then computes unloading time as ``pallets divided by efficiency''. To prevent non-physical values, sampled efficiencies are truncated below by a positive lower bound prior to computing unloading time.
+
+\subsection{Workforce (FTE) Configuration and Internal Processing Capacity}
+\label{subsec:fte_processing}
+
+Labor inputs are configured by category and flow direction (inbound/outbound). The configuration file provides baseline FTE values and an efficiency factor for FG and R\&P. The simulation uses these to compute an internal processing capacity that determines the duration of the processing stage as a function of pallet volume. Additionally, the processing capacity incorporates an explicit $\pm 5\%$ variability factor (implemented as a multiplicative random perturbation) to represent operational fluctuations in processing performance.
+
+\begin{table}[H]
+    \centering
+    \caption{FTE configuration and productivity parameters.}
+    \label{tab:ch4_fte_config}
+    \begin{tabular}{lccl}
+        \hline
+        Category & Inbound FTE & Outbound FTE & Efficiency (pallet/FTE) \\
+        \hline
+        FG   & 44.75  & 44.75  & 665.43  \\
+        R\&P & 10.025 & 10.025 & 1308.83 \\
+        \hline
+    \end{tabular}
+\end{table}
+
+\subsection{Labor Capacity and Productivity}
+
+Labor capacity is represented by Full-Time Equivalent (FTE) resources allocated to inbound and outbound processing for FG and R\&P flows. Baseline FTE values are specified exogenously.
+
+Processing productivity is defined in terms of pallets processed per FTE per unit time. During simulation, effective hourly processing capacity is computed from the baseline productivity and the available FTE.
+
+Warehouse opening time directly affects available labor capacity. When opening hours are reduced, effective FTE availability is scaled proportionally according to the ratio of active operating hours to a reference full-day schedule.
+
+\subsection{Service Level Rules}
+
+% UPDATED: Added detailed region-based service level rules (G2/ROW)
+For FG outbound flows, service level constraints are defined by destination region and applied through pre-allocated timeslots:
+\begin{itemize}
+    \item G2 same-day: orders must load at their allocated timeslot on the same day as creation
+    \item G2 next-day: orders must load at their allocated timeslot by the next day
+    \item ROW next-day: orders must load at their allocated timeslot by the next day
+\end{itemize}
+
+The region distribution follows an empirically-calibrated 40\%-40\%-20\% split for G2\_same\_day, G2\_next\_day, and ROW\_next\_day respectively.
+
+Service level compliance is evaluated by comparing actual loading completion times with assigned timeslots. An order that misses its allocated timeslot due to processing delays or capacity constraints is flagged as delayed.
+
+No region-based service level constraints are applied to R\&P outbound flows.
+
+Inbound flows are subject to a processing completion requirement within 24 hours of arrival. Violations are recorded as inbound delays.
+
+% =========================================================
+% 4.5 Process logic (step-by-step, no distribution details)
+% =========================================================
+\section{Process Logic by Operational Flow}
+\label{sec:process_logic}
+
+This section details the step-by-step operational logic for each flow in the simulation. The description follows the implemented event sequence: entity creation, attribute assignment, internal processing (labor-constrained), dock service (timeslot-constrained), and KPI logging. Numerical parameter values and the specific probability distributions used to generate them are documented in Section~\ref{sec:sim_inputs}; this section focuses on \emph{process structure and decision rules}.
+
+\subsection{FG Outbound Flow}
+\label{subsec:fg_outbound_logic}
+
+The FG outbound flow models the release and execution of outbound shipments under dock-capacity constraints and timeslot requirements.
+
+\paragraph{Step 1: Order activation at creation time.}
+Orders are pre-generated with assigned \texttt{creation\_time}, \texttt{timeslot\_time}, and \texttt{region} attributes. For FG outbound, the region (G2\_same\_day, G2\_next\_day, or ROW\_next\_day) determines the service-level requirement. At simulation time equal to \texttt{creation\_time}, the order is activated and enters the processing queue.
+
+\paragraph{Step 2: Internal processing stage (labor-constrained).}
+After activation, the order enters an internal processing stage. The simulation records the start and end timestamps of processing. Processing duration is determined by the relationship between pallet volume and the effective internal processing capacity available for FG outbound (labor/FTE-based).
+
+\paragraph{Step 3: Waiting for pre-allocated timeslot.}
+Upon completion of internal processing, the order waits until its pre-allocated \texttt{timeslot\_time} arrives. The simulation tracks whether processing completes in time for the allocated slot.
+
+\paragraph{Step 4: Loading dock acquisition (timeslot-constrained).}
+At the allocated timeslot hour, the order attempts to acquire an available loading dock position for FG. If capacity is exhausted, the order experiences a timeslot miss. When a dock position is acquired, the simulation records the dock service start time and logs any waiting time.
+
+\paragraph{Step 5: Loading execution and completion.}
+The model then executes the loading activity as a service operation occupying the acquired dock position. The service end time is recorded upon completion.
+
+\paragraph{Step 6: Performance logging.}
+The simulation logs whether the order loaded at its allocated timeslot (on-time) or experienced a delay. For FG outbound, the order's region is also recorded to enable regional performance analysis. The outbound operation is logged for throughput accounting.
+
+\subsection{R\&P Outbound Flow}
+\label{subsec:rp_outbound_logic}
+
+The R\&P outbound flow follows the same structure as FG outbound: orders are pre-generated with creation times and timeslot allocations, processed through FTE-constrained preparation, and loaded at their allocated slots subject to dock capacity constraints.
+
+\paragraph{Step 1: Order activation.}
+R\&P outbound orders are triggered at their \texttt{creation\_time} and assigned a pallet load.
+
+\paragraph{Step 2: Internal processing stage (labor-constrained).}
+Each R\&P outbound order passes through an internal processing stage constrained by the effective R\&P outbound processing capacity. Processing start and end timestamps are recorded.
+
+\paragraph{Step 3: Waiting for timeslot and loading.}
+After processing, the order waits for its pre-allocated timeslot, acquires dock capacity when available, and completes loading. Performance metrics are logged.
+
+\subsection{Inbound Flow (FG and R\&P)}
+\label{subsec:inbound_logic}
+
+The inbound flow models truck reception, unloading, and post-unloading processing with a strict "processing within 24 hours" requirement.
+
+\paragraph{Step 1: Truck creation and arrival.}
+Inbound trucks are generated for FG and R\&P according to their respective hourly arrival-rate profiles. Each inbound truck is assigned a pallet load and enters the inbound handling process upon arrival.
+
+\paragraph{Step 2: Reception dock acquisition (timeslot-constrained waiting).}
+Each inbound truck attempts to acquire a reception (unloading) timeslot corresponding to its category (FG reception vs R\&P reception). If reception capacity is not available, the truck waits and re-attempts periodically. Once a timeslot is acquired, the simulation records dock service start time and logs truck waiting time excluding DC closure periods.
+
+\paragraph{Step 3: Unloading execution.}
+The unloading activity is executed as a dock service whose duration depends on a category-specific unloading-time generator. The inbound operation (start time, end time, pallet volume, and provenance) is logged.
+
+\paragraph{Step 4: Post-unloading processing and 24-hour requirement.}
+After unloading, pallets enter a processing stage constrained by the effective inbound processing capacity of the corresponding category. The model defines a processing deadline equal to 24 hours after the truck's arrival. If processing completes after this deadline, the delay (in hours) is recorded as an inbound-delay KPI event.
+
+\subsection{Hourly and Daily Monitoring Processes (KPI-only)}
+\label{subsec:monitoring_processes}
+
+In addition to the truck-level processes above, the simulation runs monitoring processes to record system-level time series.
+
+\paragraph{Hourly dock utilization logging.}
+An hourly manager logs the used versus available dock capacity by category and dock type at each hour boundary, and then resets usage counters for the next hour.
+
+\paragraph{Midnight backlog logging.}
+The model logs a ``midnight backlog'' each day to track pending orders and workload accumulation.
+
+\paragraph{Volume monitoring.}
+The model keeps tracking different types of orders' volume as well as the timeslot compliance states and records performance metrics.
+
+% =========================
+% 4.6 KPI Definitions, Computation, and Intended Use
+% =========================
+\section{Key Performance Indicators: Definitions, Computation, and Intended Use}
+\label{sec:kpi_deep}
+
+All KPIs are computed from event logs maintained by \texttt{KPICollector} in simulation. This section documents each KPI in terms of: (i) what it measures, (ii) how it is computed in code, and (iii) how it is intended to be used for scenario evaluation.
+
+\subsection{Truck Waiting Time}
+\label{subsec:kpi_wait}
+
+\paragraph{What it measures.}
+The waiting time KPI quantifies congestion and dock capacity scarcity from the truck perspective. The model explicitly distinguishes between total waiting time and ``business waiting time'' that excludes DC closure periods.
+
+\paragraph{How it is computed.}
+For each truck, total waiting time is:
+\[
+W_{\text{total}} = t_{\text{service start}} - t_{\text{actual arrival}}.
+\]
+Business waiting time $W_{\text{biz}}$ is computed by iterating from arrival to service start and accumulating only time segments falling within opening hours. Closure intervals are skipped by jumping directly to the next opening time. The KPI log stores:
+\begin{itemize}
+    \item wait\_time: business waiting time $W_{\text{biz}}$
+    \item total\_wait: $W_{\text{total}}$
+    \item overnight: a Boolean indicating whether the wait spans at least one full daily closure duration (derived from opening window)
+\end{itemize}
+
+\paragraph{How it is used.}
+This KPI is a primary indicator of dock feasibility under shorter opening windows: increasing $W_{\text{biz}}$ indicates that trucks are queuing during operational hours, reflecting insufficient dock capacity and/or mismatched arrival patterns. The summary report provides mean, maximum, and 95th percentile of \texttt{wait\_time}.
+
+\subsection{Dock Utilization and Over-capacity}
+\label{subsec:kpi_dock}
+
+\paragraph{What it measures.}
+Dock utilization quantifies how intensively reception/loading capacity is used by hour, category, and direction.
+
+\paragraph{How it is computed.}
+At each hour transition, the simulation logs \texttt{used} and \texttt{available} dock slots for:
+\[
+(c, d) \in \{\text{FG}, \text{R\&P}\} \times \{\text{reception}, \text{loading}\}.
+\]
+Utilization is computed as:
+\[
+u = 
+\begin{cases}
+\min\left(\frac{\text{used}}{\text{available}}, 1\right), & \text{if available}>0,\\
+0, & \text{otherwise}.
+\end{cases}
+\]
+The model also records:
+\[
+\text{over\_capacity} = \max(0,\ \text{used}-\text{available}),
+\]
+which flags any logical exceedance of nominal capacity (though utilization is capped at 100\% for reporting).
+
+\paragraph{How it is used.}
+Utilization supports diagnosis of whether performance loss under shorter opening time stems from dock saturation (high utilization and high waiting) or from processing constraints (lower utilization but long processing-induced delays). The summary includes overall mean utilization and detailed hourly utilization statistics (including mean \texttt{used} and \texttt{available}).
+
+\subsection{Outbound Timeslot Compliance (Overall and by Region)}
+\label{subsec:kpi_sla}
+
+% UPDATED: Added regional breakdown (G2 vs ROW) to compliance metrics
+\paragraph{What it measures.}
+Timeslot compliance measures the fraction of outbound orders that successfully load at their pre-allocated timeslot. For FG outbound, compliance is additionally tracked by destination region (G2 vs ROW).
+
+\paragraph{How it is computed.}
+For each outbound order, the model records whether loading occurred at the hour matching the order's \texttt{timeslot\_time}. The overall compliance rate is:
+\[
+\text{Timeslot compliance rate} = \frac{\#\text{orders loaded at allocated slot}}{\#\text{total orders processed}}.
+\]
+
+For FG outbound, regional compliance rates are computed separately for G2 and ROW by filtering orders based on their \texttt{region} attribute prefix:
+\[
+\text{G2 compliance rate} = \frac{\#\text{G2 orders on-time}}{\#\text{total G2 orders}},\quad
+\text{ROW compliance rate} = \frac{\#\text{ROW orders on-time}}{\#\text{total ROW orders}}.
+\]
+
+\paragraph{How it is used.}
+Timeslot compliance is a core service-risk KPI. In scenario analysis, any opening-time reduction that materially reduces compliance indicates a service degradation due to processing delays or capacity constraints preventing timely loading. The regional decomposition reveals whether service impacts are uniform or disproportionately affect specific customer segments (G2 vs ROW).
+
+\subsection{Inbound 24-hour Processing Delay}
+\label{subsec:kpi_inbound_delay}
+
+\paragraph{What it measures.}
+This KPI measures whether inbound pallets are fully unloaded and processed within 24 hours of arrival.
+
+\paragraph{How it is computed.}
+Each inbound truck has a deadline:
+\[
+t_{\text{deadline}} = t_{\text{arrival}} + 24.
+\]
+After unloading and inbound processing, if the processing end time exceeds the deadline, the delay is recorded as:
+\[
+\text{delay\_hours} = t_{\text{end}} - t_{\text{deadline}}.
+\]
+The summary reports the number of delayed inbound events, total delayed pallets, mean and maximum delay hours, and category-specific counts.
+
+\paragraph{How it is used.}
+Inbound delay is treated as an operational feasibility KPI: persistent inbound delays imply that shorter opening windows and/or reduced labor capacity create backlog that breaches a 24-hour processing requirement.
+
+\subsection{Throughput: Pallets and Order Counts}
+\label{subsec:kpi_throughput}
+
+\paragraph{What it measures.}
+Throughput is recorded to quantify volume processed and shipped under each scenario and to support interpretation of utilization and delays.
+
+\paragraph{How it is computed.}
+The simulation logs inbound and outbound operations with pallet quantities. The summary aggregates total pallets and counts of operations by category and direction:
+\[
+\text{Pallets}_{c,\text{in}} = \sum_{\text{inbound ops of }c} P,\quad
+\text{Pallets}_{c,\text{out}} = \sum_{\text{outbound ops of }c} P.
+\]
+
+\paragraph{How it is used.}
+Throughput supports both performance interpretation and sanity checking. If order generation is consistent across scenarios, significant reductions in realized throughput indicate that the system fails to clear arriving workload due to capacity constraints.
+
+\section{Verification and Validation}
+\label{sec:verification_validation}
+
+\subsection{Verification}
+
+Model verification focuses on ensuring correct implementation of process logic and resource constraints. Specific checks include:
+
+\begin{itemize}
+    \item Arrival rate consistency: verified that hourly arrival counts match configured $\lambda_h$ distributions
+    \item Capacity enforcement: verified that dock usage never exceeds available capacity during opening hours
+    \item Order triggering: verified that outbound orders activate at their specified \texttt{creation\_time}
+    \item Timeslot allocation: verified that orders are assigned to their pre-allocated timeslot hours
+    \item FTE scaling: verified proportional reduction of processing capacity under shorter opening hours
+    \item Resource utilization: confirmed that utilization metrics align with observed dock usage patterns
+\end{itemize}
+
+\subsection{Validation}
+
+% UPDATED: Explicitly stated 8-month validation data range
+Validation is conducted through consistency checks against empirical operational characteristics. Hourly processing output generated by the simulation is compared against observed productivity ranges derived from historical data (months 1-8).
+
+Dock utilization profiles are examined to ensure that simulated congestion patterns align with known peak and off-peak behavior observed in the source timeslot data.
+
+\textbf{Limitation:} A formal statistical goodness-of-fit test between simulated and observed hourly productivity distributions has not been conducted and would require additional empirical datasets beyond the current 8-month window.
+
+\section{Simulation Experiment Design}
+\label{sec:experiment_design}
+
+The validated simulation model is executed under multiple opening time configurations. Each configuration is simulated multiple times to account for stochastic variability. Simulation outputs are aggregated and exported for scenario-based comparison.
+
+The results of these experiments are analyzed in Chapter~\ref{ch:scenario_analysis}.
